@@ -1,0 +1,14 @@
+# Diretórios de compilação
+bin/
+obj/
+publish_zip/
+.dotnet/
+
+# Arquivos locais e de cache
+*.user
+*.suo
+*.log
+.vs/
+
+# Instalador gerado
+RadminStream_Setup.exe
