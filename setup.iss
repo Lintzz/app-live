@@ -1,6 +1,6 @@
 [Setup]
 AppName=Radmin Stream Live
-AppVersion=1.0.8
+AppVersion=1.0.9
 DefaultDirName={pf}\Radmin Stream Live
 DefaultGroupName=Radmin Stream Live
 UninstallDisplayIcon={app}\RadminStreamApp.exe
