@@ -149,21 +149,24 @@ namespace RadminStreamApp
                     if (message == "STREAM_STOPPED")
                     {
                         System.Windows.Application.Current.Dispatcher.Invoke(() => {
+                            try { _streamManager?.Stop(); } catch { }
                             VideoPlayer.Source = null;
                             StatusText.Text = "Transmissão Encerrada";
                             StatusText.Visibility = Visibility.Visible;
-                            _streamManager?.Stop();
                         });
                         return;
                     }
                     if (message == "STREAM_STARTED")
                     {
-                        if (_streamManager != null)
-                        {
-                            await _streamManager.InitializeClient();
-                            var msg = new SignalingMessage { Type = "CLIENT_CONNECTED", Data = "", SenderId = "client" };
-                            _client.SendMessage(System.Text.Json.JsonSerializer.Serialize(msg));
-                        }
+                        System.Windows.Application.Current.Dispatcher.Invoke(async () => {
+                            if (_streamManager != null)
+                            {
+                                try { _streamManager.Stop(); } catch { }
+                                await _streamManager.InitializeClient();
+                                var msg = new SignalingMessage { Type = "CLIENT_CONNECTED", Data = "", SenderId = "client" };
+                                _client.SendMessage(System.Text.Json.JsonSerializer.Serialize(msg));
+                            }
+                        });
                         return;
                     }
                     if (_streamManager != null)
@@ -186,6 +189,7 @@ namespace RadminStreamApp
 
                 _streamManager.OnConnectionStateChanged += (state) => {
                     System.Windows.Application.Current.Dispatcher.InvokeAsync(() => {
+                        if (StatusText.Text == "Transmissão Encerrada" && (state.ToString() == "closed" || state.ToString() == "disconnected")) return;
                         StatusText.Text = $"WebRTC: {state}";
                         StatusText.Visibility = Visibility.Visible;
                     });
@@ -331,12 +335,12 @@ namespace RadminStreamApp
 
         private void BtnStopStream_Click(object sender, RoutedEventArgs e)
         {
+            _server?.BroadcastMessage("STREAM_STOPPED");
             if (_streamManager != null)
             {
-                _streamManager.Stop();
+                try { _streamManager.Stop(); } catch { }
                 _streamManager = null;
             }
-            _server?.BroadcastMessage("STREAM_STOPPED");
             BtnStartStream.Content = "Start Stream";
             BtnStartStream.IsEnabled = true;
             BtnStopStream.IsEnabled = false;
