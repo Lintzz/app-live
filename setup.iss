@@ -1,7 +1,6 @@
-#define MyAppVersion GetFileVersion("publish_zip\RadminStreamApp.exe")
 [Setup]
 AppName=Radmin Stream Live
-AppVersion={#MyAppVersion}
+AppVersion=1.0.5
 DefaultDirName={pf}\Radmin Stream Live
 DefaultGroupName=Radmin Stream Live
 UninstallDisplayIcon={app}\RadminStreamApp.exe
@@ -17,8 +16,8 @@ SetupIconFile=app_icon.ico
 Source: "publish_zip\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
-Name: "{group}\Radmin Stream Live"; Filename: "{app}\RadminStreamApp.exe"
-Name: "{commondesktop}\Radmin Stream Live"; Filename: "{app}\RadminStreamApp.exe"
+Name: "{group}\Radmin Stream Live"; Filename: "{app}\RadminStreamApp.exe"; WorkingDir: "{app}"
+Name: "{commondesktop}\Radmin Stream Live"; Filename: "{app}\RadminStreamApp.exe"; WorkingDir: "{app}"
 
 [Run]
 Filename: "{app}\RadminStreamApp.exe"; Description: "Launch Radmin Stream Live"; Flags: nowait postinstall skipifsilent
