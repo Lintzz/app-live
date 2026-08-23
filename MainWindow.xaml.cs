@@ -208,51 +208,7 @@ namespace RadminStreamApp
                 {
                     await _client.StartAsync(ip, 8080);
                     
-                    // Em caso de a biblioteca não disparar o OnConnected para a primeira conexão
-                    bool isRunning = false;
-                    try {
-                        isRunning = (bool)_client.GetType().GetProperty("IsRunning")?.GetValue(_client);
-                    } catch { }
 
-                    if (!_isClientInitialized && isRunning)
-                    {
-                        System.Windows.Application.Current.Dispatcher.Invoke(async () => {
-                            if (_isClientInitialized) return;
-                            _isClientInitialized = true;
-                            
-                            if (_streamManager != null)
-                            {
-                                try { _streamManager.Stop(); } catch { }
-                            }
-                            
-                            _streamManager = new StreamManager();
-                            
-                            _streamManager.OnVideoFrameDecoded += (pixelData, width, height, stride) => {
-                                StreamManager_OnVideoFrameDecoded(pixelData, width, height, stride);
-                                System.Windows.Application.Current.Dispatcher.InvokeAsync(() => {
-                                    StatusText.Visibility = Visibility.Collapsed;
-                                });
-                            };
-
-                            _streamManager.OnConnectionStateChanged += (state) => {
-                                System.Windows.Application.Current.Dispatcher.InvokeAsync(() => {
-                                    if (StatusText.Text.Contains("Host Offline") && (state.ToString() == "closed" || state.ToString() == "disconnected" || state.ToString() == "failed")) return;
-                                    StatusText.Text = $"WebRTC: {state}";
-                                    StatusText.Visibility = Visibility.Visible;
-                                });
-                            };
-
-                            _streamManager.OnLocalSdpReady += (clientId, sdpJson) => {
-                                _client?.SendMessage(sdpJson);
-                            };
-                            
-                            _streamManager.SetVolume((float)SliderVolume.Value / 100f);
-
-                            await _streamManager.InitializeClient();
-                            var msg = new SignalingMessage { Type = "CLIENT_CONNECTED", Data = "", SenderId = "client" };
-                            _client.SendMessage(System.Text.Json.JsonSerializer.Serialize(msg));
-                        });
-                    }
 
                     BtnConnect.Content = "Connected";
                     BtnConnect.IsEnabled = false;
@@ -334,15 +290,11 @@ namespace RadminStreamApp
                 
                 _streamManager.OnLocalSdpReady += (clientId, sdpJson) => {
                     if (_server == null) return;
-                    var clients = _server.GetType().GetField("_clients", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)?.GetValue(_server) as System.Collections.Generic.List<Fleck.IWebSocketConnection>;
-                    if (clients != null)
+                    foreach (var client in _server.Clients)
                     {
-                        foreach (var client in clients)
+                        if (client.ConnectionInfo.Id.ToString() == clientId || clientId == "host")
                         {
-                            if (client.ConnectionInfo.Id.ToString() == clientId || clientId == "host")
-                            {
-                                _server.SendMessage(client, sdpJson);
-                            }
+                            _server.SendMessage(client, sdpJson);
                         }
                     }
                 };
