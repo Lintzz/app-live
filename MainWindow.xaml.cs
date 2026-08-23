@@ -14,6 +14,7 @@ namespace RadminStreamApp
         private StreamManager _streamManager;
         private WriteableBitmap _writeableBitmap;
         private System.Windows.Threading.DispatcherTimer _mouseIdleTimer;
+        private bool _isClientInitialized = false;
 
         private string _downloadUrl;
 
@@ -156,6 +157,9 @@ namespace RadminStreamApp
 
                 _client.OnConnected += () => {
                     System.Windows.Application.Current.Dispatcher.Invoke(async () => {
+                        if (_isClientInitialized) return;
+                        _isClientInitialized = true;
+                        
                         if (_streamManager != null)
                         {
                             try { _streamManager.Stop(); } catch { }
@@ -192,6 +196,7 @@ namespace RadminStreamApp
 
                 _client.OnDisconnected += () => {
                     System.Windows.Application.Current.Dispatcher.Invoke(() => {
+                        _isClientInitialized = false;
                         try { _streamManager?.Stop(); } catch { }
                         VideoPlayer.Source = null;
                         StatusText.Text = "Host Offline - Aguardando transmissão...";
@@ -203,6 +208,52 @@ namespace RadminStreamApp
                 {
                     await _client.StartAsync(ip, 8080);
                     
+                    // Em caso de a biblioteca não disparar o OnConnected para a primeira conexão
+                    bool isRunning = false;
+                    try {
+                        isRunning = (bool)_client.GetType().GetProperty("IsRunning")?.GetValue(_client);
+                    } catch { }
+
+                    if (!_isClientInitialized && isRunning)
+                    {
+                        System.Windows.Application.Current.Dispatcher.Invoke(async () => {
+                            if (_isClientInitialized) return;
+                            _isClientInitialized = true;
+                            
+                            if (_streamManager != null)
+                            {
+                                try { _streamManager.Stop(); } catch { }
+                            }
+                            
+                            _streamManager = new StreamManager();
+                            
+                            _streamManager.OnVideoFrameDecoded += (pixelData, width, height, stride) => {
+                                StreamManager_OnVideoFrameDecoded(pixelData, width, height, stride);
+                                System.Windows.Application.Current.Dispatcher.InvokeAsync(() => {
+                                    StatusText.Visibility = Visibility.Collapsed;
+                                });
+                            };
+
+                            _streamManager.OnConnectionStateChanged += (state) => {
+                                System.Windows.Application.Current.Dispatcher.InvokeAsync(() => {
+                                    if (StatusText.Text.Contains("Host Offline") && (state.ToString() == "closed" || state.ToString() == "disconnected" || state.ToString() == "failed")) return;
+                                    StatusText.Text = $"WebRTC: {state}";
+                                    StatusText.Visibility = Visibility.Visible;
+                                });
+                            };
+
+                            _streamManager.OnLocalSdpReady += (clientId, sdpJson) => {
+                                _client?.SendMessage(sdpJson);
+                            };
+                            
+                            _streamManager.SetVolume((float)SliderVolume.Value / 100f);
+
+                            await _streamManager.InitializeClient();
+                            var msg = new SignalingMessage { Type = "CLIENT_CONNECTED", Data = "", SenderId = "client" };
+                            _client.SendMessage(System.Text.Json.JsonSerializer.Serialize(msg));
+                        });
+                    }
+
                     BtnConnect.Content = "Connected";
                     BtnConnect.IsEnabled = false;
                     BtnDisconnect.IsEnabled = true;
@@ -321,7 +372,14 @@ namespace RadminStreamApp
                     _streamManager.InitializeHost();
                 });
                 
-                _server?.Start("0.0.0.0", 8080);
+                try
+                {
+                    _server?.Start("0.0.0.0", 8080);
+                }
+                catch (Exception ex)
+                {
+                    System.Windows.MessageBox.Show($"Erro ao iniciar servidor de rede: A porta 8080 já pode estar em uso por outra instância do programa. Detalhes: {ex.Message}", "Erro", MessageBoxButton.OK, MessageBoxImage.Error);
+                }
             }
             else
             {
