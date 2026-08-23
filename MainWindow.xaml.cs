@@ -162,10 +162,34 @@ namespace RadminStreamApp
                             if (_streamManager != null)
                             {
                                 try { _streamManager.Stop(); } catch { }
-                                await _streamManager.InitializeClient();
-                                var msg = new SignalingMessage { Type = "CLIENT_CONNECTED", Data = "", SenderId = "client" };
-                                _client.SendMessage(System.Text.Json.JsonSerializer.Serialize(msg));
                             }
+                            
+                            _streamManager = new StreamManager();
+                            
+                            _streamManager.OnVideoFrameDecoded += (pixelData, width, height, stride) => {
+                                StreamManager_OnVideoFrameDecoded(pixelData, width, height, stride);
+                                System.Windows.Application.Current.Dispatcher.InvokeAsync(() => {
+                                    StatusText.Visibility = Visibility.Collapsed;
+                                });
+                            };
+
+                            _streamManager.OnConnectionStateChanged += (state) => {
+                                System.Windows.Application.Current.Dispatcher.InvokeAsync(() => {
+                                    if (StatusText.Text == "Transmissão Encerrada" && (state.ToString() == "closed" || state.ToString() == "disconnected" || state.ToString() == "failed")) return;
+                                    StatusText.Text = $"WebRTC: {state}";
+                                    StatusText.Visibility = Visibility.Visible;
+                                });
+                            };
+
+                            _streamManager.OnLocalSdpReady += (clientId, sdpJson) => {
+                                _client?.SendMessage(sdpJson);
+                            };
+                            
+                            _streamManager.SetVolume((float)SliderVolume.Value / 100f);
+
+                            await _streamManager.InitializeClient();
+                            var msg = new SignalingMessage { Type = "CLIENT_CONNECTED", Data = "", SenderId = "client" };
+                            _client.SendMessage(System.Text.Json.JsonSerializer.Serialize(msg));
                         });
                         return;
                     }
@@ -189,7 +213,7 @@ namespace RadminStreamApp
 
                 _streamManager.OnConnectionStateChanged += (state) => {
                     System.Windows.Application.Current.Dispatcher.InvokeAsync(() => {
-                        if (StatusText.Text == "Transmissão Encerrada" && (state.ToString() == "closed" || state.ToString() == "disconnected")) return;
+                        if (StatusText.Text == "Transmissão Encerrada" && (state.ToString() == "closed" || state.ToString() == "disconnected" || state.ToString() == "failed")) return;
                         StatusText.Text = $"WebRTC: {state}";
                         StatusText.Visibility = Visibility.Visible;
                     });
