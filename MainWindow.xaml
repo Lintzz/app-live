@@ -5,6 +5,7 @@
         Background="#0F0F13"
         WindowStartupLocation="CenterScreen"
         MouseLeftButtonDown="Window_MouseLeftButtonDown"
+        PreviewKeyDown="Window_PreviewKeyDown"
         Icon="app_icon.ico">
     
     <WindowChrome.WindowChrome>
@@ -96,7 +97,14 @@
 
         <!-- Primary Button Style -->
         <Style x:Key="PrimaryButton" TargetType="Button" BasedOn="{StaticResource ModernButton}">
-            <Setter Property="Background" Value="#007ACC"/>
+            <Setter Property="Background">
+                <Setter.Value>
+                    <LinearGradientBrush StartPoint="0,0" EndPoint="1,1">
+                        <GradientStop Color="#0094F2" Offset="0.0"/>
+                        <GradientStop Color="#005A9E" Offset="1.0"/>
+                    </LinearGradientBrush>
+                </Setter.Value>
+            </Setter>
             <Setter Property="Foreground" Value="White"/>
             <Setter Property="Template">
                 <Setter.Value>
@@ -205,6 +213,7 @@
         <Grid x:Name="TitleBarGrid" Grid.Row="0" Height="32" Background="Transparent">
             <TextBlock Text="Radmin Stream Live" Foreground="#AAAAAA" VerticalAlignment="Center" Margin="15,0,0,0" FontSize="12" FontWeight="SemiBold"/>
             <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
+                <Button Content="&#xE713;" FontFamily="Segoe MDL2 Assets" Width="46" Style="{StaticResource TitleBarButtonStyle}" Click="BtnSettingsModal_Click" ToolTip="Configurações"/>
                 <Button Content="&#xE921;" FontFamily="Segoe MDL2 Assets" Width="46" Style="{StaticResource TitleBarButtonStyle}" Click="BtnMinimize_Click"/>
                 <Button Content="&#xE922;" FontFamily="Segoe MDL2 Assets" Width="46" Style="{StaticResource TitleBarButtonStyle}" Click="BtnMaximize_Click"/>
                 <Button Content="&#xE106;" FontFamily="Segoe MDL2 Assets" Width="46" Style="{StaticResource TitleBarCloseButtonStyle}" Click="BtnClose_Click"/>
@@ -232,6 +241,9 @@
 
         <!-- Top Panel (Controls) -->
         <Border x:Name="TopPanel" Grid.Row="2" Margin="15,10,15,15" Background="#18181E" CornerRadius="8" Padding="15">
+            <Border.Effect>
+                <DropShadowEffect Color="Black" BlurRadius="10" Opacity="0.3" ShadowDepth="2"/>
+            </Border.Effect>
             <StackPanel Orientation="Horizontal" HorizontalAlignment="Center">
                 
                 <StackPanel Orientation="Horizontal" Margin="0,0,20,0">
@@ -253,6 +265,10 @@
                     </ComboBox>
                     <Button x:Name="BtnStartStream" Content="Start" Style="{StaticResource PrimaryButton}" Margin="0,0,10,0" Click="BtnStartStream_Click"/>
                     <Button x:Name="BtnStopStream" Content="Stop" Style="{StaticResource DangerButton}" IsEnabled="False" Click="BtnStopStream_Click"/>
+                    <StackPanel x:Name="ViewerCountPanel" Orientation="Horizontal" VerticalAlignment="Center" Margin="10,0,0,0">
+                        <TextBlock Text="&#xE13D;" FontFamily="Segoe MDL2 Assets" Foreground="#AAAAAA" FontSize="16" VerticalAlignment="Center" Margin="0,0,5,0"/>
+                        <TextBlock x:Name="ViewerCountText" Text="0 Viewers" Foreground="White" FontWeight="SemiBold" VerticalAlignment="Center"/>
+                    </StackPanel>
                 </StackPanel>
 
                 <!-- Client Controls -->
@@ -267,14 +283,17 @@
         </Border>
 
         <!-- Video Player -->
-        <Border x:Name="VideoBorder" Grid.Row="3" Background="#0F0F13" Margin="15,0,15,15" CornerRadius="8" ClipToBounds="True">
+        <Border x:Name="VideoBorder" Grid.Row="3" Background="#050508" Margin="15,0,15,15" CornerRadius="12" ClipToBounds="True" BorderBrush="#2D2D35" BorderThickness="1">
+            <Border.Effect>
+                <DropShadowEffect Color="Black" BlurRadius="20" Opacity="0.6" ShadowDepth="5"/>
+            </Border.Effect>
             <Grid>
                 <TextBlock x:Name="StatusText" Text="No Signal" Foreground="#222222" FontSize="24" FontWeight="Bold" HorizontalAlignment="Center" VerticalAlignment="Center"/>
                 <Image x:Name="VideoPlayer" Stretch="Uniform" MouseDown="VideoPlayer_MouseDown"/>
                 
                 <StackPanel x:Name="VideoControlsPanel" Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Bottom" Margin="10">
                     <TextBlock x:Name="IconVolume" Visibility="Collapsed" Text="&#xE767;" FontFamily="Segoe MDL2 Assets" Foreground="#66FFFFFF" FontSize="18" VerticalAlignment="Center" Margin="0,0,5,0"/>
-                    <Slider x:Name="SliderVolume" Visibility="Collapsed" Width="80" Minimum="0" Maximum="100" Value="50" VerticalAlignment="Center" Margin="0,0,15,0" ValueChanged="SliderVolume_ValueChanged"/>
+                    <Slider x:Name="SliderVolume" Visibility="Collapsed" Width="80" Minimum="0" Maximum="200" Value="100" VerticalAlignment="Center" Margin="0,0,15,0" ValueChanged="SliderVolume_ValueChanged"/>
                     
                     <Button x:Name="BtnSettings" Visibility="Collapsed" Style="{StaticResource VideoControlButton}" ToolTip="Qualidade do Vídeo" Click="BtnSettings_Click">
                         <Button.ContextMenu>
@@ -296,7 +315,86 @@
         </Border>
 
         <!-- Floating Overlay for Mouse Activity -->
-        <Grid x:Name="OverlayGrid" Grid.RowSpan="4" Background="Transparent" Visibility="Collapsed">
+        <Grid x:Name="OverlayGrid" Grid.RowSpan="4" Background="Transparent" Visibility="Collapsed" IsHitTestVisible="False">
+        </Grid>
+
+        <!-- Settings Modal Overlay -->
+        <Grid x:Name="SettingsModalOverlay" Grid.RowSpan="4" Background="#99000000" Visibility="Collapsed" Panel.ZIndex="100">
+            <Border Background="#18181E" Width="450" Height="300" CornerRadius="8" HorizontalAlignment="Center" VerticalAlignment="Center">
+                <Border.Effect>
+                    <DropShadowEffect Color="Black" BlurRadius="20" Opacity="0.5" ShadowDepth="5"/>
+                </Border.Effect>
+                <Grid>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="*"/>
+                    </Grid.RowDefinitions>
+                    
+                    <!-- Modal Header -->
+                    <Grid Grid.Row="0" Margin="20,20,20,10">
+                        <TextBlock Text="Configurações" Foreground="White" FontSize="18" FontWeight="SemiBold"/>
+                        <Button Content="&#xE106;" FontFamily="Segoe MDL2 Assets" HorizontalAlignment="Right" Foreground="#AAAAAA" Background="Transparent" BorderThickness="0" Width="30" Height="30" Cursor="Hand" Click="BtnCloseSettingsModal_Click">
+                            <Button.Template>
+                                <ControlTemplate TargetType="Button">
+                                    <Border Background="{TemplateBinding Background}">
+                                        <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                                    </Border>
+                                </ControlTemplate>
+                            </Button.Template>
+                        </Button>
+                    </Grid>
+                    
+                    <!-- Tabs -->
+                    <TabControl Grid.Row="1" Background="Transparent" BorderThickness="0" Margin="10,0,10,10">
+                        <TabControl.Resources>
+                            <Style TargetType="TabItem">
+                                <Setter Property="Template">
+                                    <Setter.Value>
+                                        <ControlTemplate TargetType="TabItem">
+                                            <Border Name="Border" Background="Transparent" BorderThickness="0,0,0,2" BorderBrush="Transparent" Margin="0,0,10,0" Padding="5,5,5,10" Cursor="Hand">
+                                                <ContentPresenter x:Name="ContentSite" VerticalAlignment="Center" HorizontalAlignment="Center" ContentSource="Header"/>
+                                            </Border>
+                                            <ControlTemplate.Triggers>
+                                                <Trigger Property="IsSelected" Value="True">
+                                                    <Setter TargetName="Border" Property="BorderBrush" Value="#0094F2"/>
+                                                    <Setter Property="Foreground" Value="White"/>
+                                                </Trigger>
+                                                <Trigger Property="IsSelected" Value="False">
+                                                    <Setter Property="Foreground" Value="#AAAAAA"/>
+                                                </Trigger>
+                                            </ControlTemplate.Triggers>
+                                        </ControlTemplate>
+                                    </Setter.Value>
+                                </Setter>
+                            </Style>
+                        </TabControl.Resources>
+                        
+                        <!-- Settings Tab -->
+                        <TabItem Header="Settings" FontSize="14" FontWeight="SemiBold">
+                            <Grid Margin="10,20,10,10">
+                                <StackPanel>
+                                    <CheckBox x:Name="ChkMaxPerformance" Content="Modo de Desempenho Máximo (Menos uso de CPU)" Foreground="White" FontSize="14" IsChecked="True" Checked="ChkMaxPerformance_Changed" Unchecked="ChkMaxPerformance_Changed"/>
+                                    <TextBlock Text="Ativar esta opção diminui a prioridade do aplicativo para garantir que seus jogos rodem com mais FPS, além de otimizar os cálculos da transmissão." Foreground="#AAAAAA" FontSize="12" TextWrapping="Wrap" Margin="20,5,0,0"/>
+                                </StackPanel>
+                            </Grid>
+                        </TabItem>
+                        
+                        <!-- Info Tab -->
+                        <TabItem Header="Info" FontSize="14" FontWeight="SemiBold">
+                            <Grid Margin="10,20,10,10">
+                                <StackPanel VerticalAlignment="Center" HorizontalAlignment="Center">
+                                    <TextBlock Text="Radmin Stream Live" Foreground="White" FontSize="16" FontWeight="Bold" HorizontalAlignment="Center"/>
+                                    <TextBlock Text="Versão 1.0.6" Foreground="#AAAAAA" FontSize="14" HorizontalAlignment="Center" Margin="0,5,0,20"/>
+                                    
+                                    <TextBlock Foreground="#0094F2" FontSize="14" HorizontalAlignment="Center" Cursor="Hand" TextDecorations="Underline" MouseLeftButtonUp="GithubLink_Click">
+                                        GitHub Repository
+                                    </TextBlock>
+                                </StackPanel>
+                            </Grid>
+                        </TabItem>
+                    </TabControl>
+                </Grid>
+            </Border>
         </Grid>
     </Grid>
 </Window>

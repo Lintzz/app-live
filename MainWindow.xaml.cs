@@ -91,10 +91,25 @@ namespace RadminStreamApp
                 _server.OnMessageReceived += Server_OnMessageReceived;
                 _server.OnClientConnected += (socket) => {
                     System.Windows.Application.Current.Dispatcher.Invoke(() => {
-                        // MessageBox removed
+                        UpdateViewerCount();
+                    });
+                };
+                _server.OnClientDisconnected += (socket) => {
+                    System.Windows.Application.Current.Dispatcher.Invoke(() => {
+                        UpdateViewerCount();
                     });
                 };
                 _server.Start("0.0.0.0", 8080);
+                UpdateViewerCount();
+            }
+        }
+
+        private void UpdateViewerCount()
+        {
+            if (_server != null)
+            {
+                int count = _server.ConnectedClientsCount;
+                ViewerCountText.Text = $"{count} Viewer{(count != 1 ? "s" : "")}";
             }
         }
 
@@ -137,6 +152,7 @@ namespace RadminStreamApp
                             VideoPlayer.Source = null;
                             StatusText.Text = "Transmissão Encerrada";
                             StatusText.Visibility = Visibility.Visible;
+                            _streamManager?.Stop();
                         });
                         return;
                     }
@@ -158,11 +174,25 @@ namespace RadminStreamApp
                     _streamManager.ProcessReceivedBinary(data);
                 };
 
+                // Sync initial volume
+                _streamManager.SetVolume((float)SliderVolume.Value / 100f);
+
                 _streamManager.OnVideoFrameDecoded += (pixelData, width, height, stride) => {
                     StreamManager_OnVideoFrameDecoded(pixelData, width, height, stride);
                     System.Windows.Application.Current.Dispatcher.InvokeAsync(() => {
                         StatusText.Visibility = Visibility.Collapsed;
                     });
+                };
+
+                _streamManager.OnConnectionStateChanged += (state) => {
+                    System.Windows.Application.Current.Dispatcher.InvokeAsync(() => {
+                        StatusText.Text = $"WebRTC: {state}";
+                        StatusText.Visibility = Visibility.Visible;
+                    });
+                };
+
+                _streamManager.OnLocalSdpReady += (clientId, sdpJson) => {
+                    _client?.SendMessage(sdpJson);
                 };
                 
                 try
@@ -212,9 +242,9 @@ namespace RadminStreamApp
         {
             System.Windows.Application.Current.Dispatcher.InvokeAsync(() =>
             {
-                if (_writeableBitmap == null || _writeableBitmap.PixelWidth != width || _writeableBitmap.PixelHeight != height)
+                if (_writeableBitmap == null || _writeableBitmap.PixelWidth != width || _writeableBitmap.PixelHeight != height || _writeableBitmap.Format != PixelFormats.Bgr24)
                 {
-                    _writeableBitmap = new WriteableBitmap(width, height, 96, 96, PixelFormats.Bgra32, null);
+                    _writeableBitmap = new WriteableBitmap(width, height, 96, 96, PixelFormats.Bgr24, null);
                     VideoPlayer.Source = _writeableBitmap;
                 }
 
@@ -242,6 +272,7 @@ namespace RadminStreamApp
                 }
 
                 _streamManager = new StreamManager();
+                _streamManager.SetMaxPerformanceMode(ChkMaxPerformance?.IsChecked == true);
                 
                 _streamManager.OnAudioCaptureError += (error) => {
                     System.Windows.Application.Current.Dispatcher.Invoke(() => {
@@ -276,9 +307,17 @@ namespace RadminStreamApp
                     });
                 };
 
+                _streamManager.OnConnectionStateChanged += (state) => {
+                    System.Windows.Application.Current.Dispatcher.InvokeAsync(() => {
+                        StatusText.Text = $"WebRTC: {state}";
+                        StatusText.Visibility = Visibility.Visible;
+                    });
+                };
+
                 await System.Threading.Tasks.Task.Run(() => 
                 {
                     _streamManager.SetTargetSource(selectedSource);
+                    _streamManager.SetResolution(1920, 1080); // Forçar 1080p HD
                     _streamManager.InitializeHost();
                 });
                 
@@ -334,6 +373,7 @@ namespace RadminStreamApp
             _client?.Stop();
             _streamManager?.Stop();
             base.OnClosed(e);
+            Environment.Exit(0);
         }
 
         private void BtnFullscreen_Click(object sender, RoutedEventArgs e)
@@ -355,11 +395,18 @@ namespace RadminStreamApp
             }
         }
 
+        private WindowState _previousWindowState = WindowState.Normal;
+
         private void EnterFullscreen()
         {
+            _previousWindowState = WindowState;
+            System.Windows.Shell.WindowChrome.SetWindowChrome(this, null);
+            Visibility = Visibility.Collapsed;
             WindowStyle = WindowStyle.None;
             ResizeMode = ResizeMode.NoResize; // Fixes white border in fullscreen
+            Topmost = true;
             WindowState = WindowState.Maximized;
+            Visibility = Visibility.Visible;
             TitleBarGrid.Visibility = Visibility.Collapsed;
             TopPanel.Visibility = Visibility.Collapsed;
             OverlayGrid.Visibility = Visibility.Visible;
@@ -379,9 +426,19 @@ namespace RadminStreamApp
 
         private void ExitFullscreen()
         {
+            Topmost = false;
+            var chrome = new System.Windows.Shell.WindowChrome
+            {
+                CaptionHeight = 32,
+                ResizeBorderThickness = new Thickness(5),
+                GlassFrameThickness = new Thickness(0),
+                CornerRadius = new CornerRadius(0)
+            };
+            System.Windows.Shell.WindowChrome.SetWindowChrome(this, chrome);
+
             WindowStyle = WindowStyle.SingleBorderWindow;
             ResizeMode = ResizeMode.CanResize;
-            WindowState = WindowState.Normal;
+            WindowState = _previousWindowState;
             TitleBarGrid.Visibility = Visibility.Visible;
             TopPanel.Visibility = Visibility.Visible;
             OverlayGrid.Visibility = Visibility.Collapsed;
@@ -443,6 +500,17 @@ namespace RadminStreamApp
             }
         }
 
+        private void Window_PreviewKeyDown(object sender, System.Windows.Input.KeyEventArgs e)
+        {
+            if (e.Key == System.Windows.Input.Key.Escape)
+            {
+                if (WindowStyle == WindowStyle.None)
+                {
+                    ExitFullscreen();
+                }
+            }
+        }
+
         private void MainWindow_MouseMove(object sender, System.Windows.Input.MouseEventArgs e)
         {
             if (VideoControlsPanel != null)
@@ -477,6 +545,54 @@ namespace RadminStreamApp
         private void BtnClose_Click(object sender, RoutedEventArgs e)
         {
             Close();
+        }
+
+        private void BtnSettingsModal_Click(object sender, RoutedEventArgs e)
+        {
+            SettingsModalOverlay.Visibility = Visibility.Visible;
+        }
+
+        private void BtnCloseSettingsModal_Click(object sender, RoutedEventArgs e)
+        {
+            SettingsModalOverlay.Visibility = Visibility.Collapsed;
+        }
+
+        private void ChkMaxPerformance_Changed(object sender, RoutedEventArgs e)
+        {
+            if (ChkMaxPerformance == null) return;
+            
+            bool isMaxPerformance = ChkMaxPerformance.IsChecked == true;
+            
+            try
+            {
+                if (isMaxPerformance)
+                {
+                    Process.GetCurrentProcess().PriorityClass = ProcessPriorityClass.BelowNormal;
+                }
+                else
+                {
+                    Process.GetCurrentProcess().PriorityClass = ProcessPriorityClass.Normal;
+                }
+            }
+            catch { }
+            
+            if (_streamManager != null)
+            {
+                _streamManager.SetMaxPerformanceMode(isMaxPerformance);
+            }
+        }
+
+        private void GithubLink_Click(object sender, System.Windows.Input.MouseButtonEventArgs e)
+        {
+            try
+            {
+                Process.Start(new ProcessStartInfo
+                {
+                    FileName = "https://github.com",
+                    UseShellExecute = true
+                });
+            }
+            catch { }
         }
     }
 }

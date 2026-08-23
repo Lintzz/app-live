@@ -16,6 +16,9 @@ namespace RadminStreamApp
         public event Action<IWebSocketConnection> OnClientConnected;
         public event Action<IWebSocketConnection> OnClientDisconnected;
 
+        public int ConnectedClientsCount => _clients.Count;
+        public IReadOnlyList<IWebSocketConnection> Clients => _clients.AsReadOnly();
+
         public void Start(string ipAddress = "0.0.0.0", int port = 8080)
         {
             _server = new WebSocketServer($"ws://{ipAddress}:{port}");

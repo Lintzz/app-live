@@ -4,6 +4,7 @@ using System.Threading.Tasks;
 using SIPSorcery.Net;
 using SIPSorceryMedia.Abstractions;
 using SIPSorceryMedia.Encoders;
+using SIPSorceryMedia.FFmpeg;
 using SIPSorceryMedia.Windows;
 using System.Diagnostics;
 using System.Drawing;
@@ -20,9 +21,11 @@ namespace RadminStreamApp
         private Dictionary<string, RTCPeerConnection> _peerConnections = new Dictionary<string, RTCPeerConnection>();
         private VideoCapturer _videoCapturer;
         private AudioCapturer _audioCapturer;
-        private VpxVideoEncoder _vpxEncoder;
+        private IVideoEncoder _videoEncoder;
         private object _encoderLock = new object();
         private int _isEncoding = 0;
+        private int _frameCount = 0;
+        private bool _isMaxPerformance = true;
 
         // Signaling events
         public event Action<string, string> OnLocalSdpReady; // clientId, sdp (JSON SignalingMessage)
@@ -33,13 +36,38 @@ namespace RadminStreamApp
         public event Action<byte[], int, int, int> OnLocalVideoFrameReady; // raw local pixels
         
         public event Action<string> OnAudioCaptureError;
+        public event Action<string> OnConnectionStateChanged; // WebRTC connection state
         
         private WaveOutEvent _waveOut;
         private BufferedWaveProvider _waveProvider;
+        private NAudio.Wave.SampleProviders.VolumeSampleProvider _volumeProvider;
         private bool _isHost = false;
         
+        private void WriteLog(string filename, string content)
+        {
+            try
+            {
+                var dir = System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "RadminStreamApp");
+                System.IO.Directory.CreateDirectory(dir);
+                System.IO.File.AppendAllText(System.IO.Path.Combine(dir, filename), DateTime.Now.ToString() + ": " + content + "\n");
+            }
+            catch { }
+        }
+
         public StreamManager()
         {
+            // Set current directory to the app directory so FFmpeg can find its binaries if it relies on CWD
+            var baseDir = AppDomain.CurrentDomain.BaseDirectory;
+            if (System.IO.Directory.Exists(baseDir))
+            {
+                Environment.CurrentDirectory = baseDir;
+            }
+            
+            try { SIPSorceryMedia.FFmpeg.FFmpegInit.Initialise(); } 
+            catch (Exception ex) { WriteLog("ffmpeg_error.log", "Init Error: " + ex.ToString()); }
+
+            InitEncoder();
+
             _videoCapturer = new VideoCapturer();
             _audioCapturer = new AudioCapturer();
 
@@ -60,13 +88,21 @@ namespace RadminStreamApp
                         byte[] encoded = null;
                         lock (_encoderLock)
                         {
-                            if (_vpxEncoder != null)
+                            if (_videoEncoder != null)
                             {
-                                try 
+                                try
                                 {
-                                    encoded = _vpxEncoder.EncodeVideo(width, height, sample, format, VideoCodecsEnum.VP8);
+                                    _frameCount++;
+                                    if (_frameCount % 120 == 0) // Força um KeyFrame a cada 2 segundos (60fps)
+                                    {
+                                        _videoEncoder.ForceKeyFrame();
+                                    }
+                                    encoded = _videoEncoder.EncodeVideo(width, height, sample, format, VideoCodecsEnum.H264);
                                 }
-                                catch { }
+                                catch (Exception encodeEx)
+                                {
+                                    WriteLog("ffmpeg_encode_runtime_error.log", "Encode Run Error: " + encodeEx.ToString());
+                                }
                             }
                         }
 
@@ -120,15 +156,31 @@ namespace RadminStreamApp
 
         public void SetVolume(float volume)
         {
-            if (_waveOut != null)
+            if (_volumeProvider != null)
             {
-                _waveOut.Volume = volume;
+                _volumeProvider.Volume = volume;
             }
         }
 
         public void SetResolution(int width, int height)
         {
             _videoCapturer?.SetResolution(width, height);
+        }
+
+        public void SetMaxPerformanceMode(bool isMaxPerformance)
+        {
+            _isMaxPerformance = isMaxPerformance;
+            _videoCapturer?.SetMaxPerformanceMode(isMaxPerformance);
+            
+            lock (_encoderLock)
+            {
+                if (_videoEncoder != null)
+                {
+                    _videoEncoder.Dispose();
+                    _videoEncoder = null;
+                    InitEncoder();
+                }
+            }
         }
 
         public void SetTargetSource(CaptureSource source)
@@ -151,15 +203,29 @@ namespace RadminStreamApp
             _audioCapturer.SetTargetProcess(targetDiscordPid);
         }
 
-        public Task InitializeHost()
+        private void InitEncoder()
         {
             lock (_encoderLock)
             {
-                if (_vpxEncoder == null)
+                if (_videoEncoder == null)
                 {
-                    _vpxEncoder = new VpxVideoEncoder();
+                    // A versão atual do SIPSorcery para .NET 8 não expõe API para selecionar NVENC/AMF nativamente.
+                    // Portanto, usamos o libx264 com perfil 'ultrafast' e 'zerolatency' para garantir baixíssimo uso de CPU,
+                    // simulando a performance de uma GPU. Quando não estiver no modo desempenho, usa 'veryfast'.
+                    var x264Options = new Dictionary<string, string> 
+                    { 
+                        { "preset", _isMaxPerformance ? "ultrafast" : "veryfast" },
+                        { "tune", "zerolatency" }
+                    };
+                    
+                    _videoEncoder = new FFmpegVideoEncoder(x264Options);
                 }
             }
+        }
+
+        public Task InitializeHost()
+        {
+            InitEncoder();
             _isHost = true;
             _videoCapturer.StartVideo();
             _audioCapturer.StartAudio();
@@ -168,21 +234,18 @@ namespace RadminStreamApp
 
         public Task InitializeClient()
         {
-            lock (_encoderLock)
-            {
-                if (_vpxEncoder == null)
-                {
-                    _vpxEncoder = new VpxVideoEncoder();
-                }
-            }
+            InitEncoder();
             _isHost = false;
             if (_waveOut == null)
             {
                 _waveProvider = new BufferedWaveProvider(new WaveFormat(44100, 16, 2));
                 _waveProvider.DiscardOnBufferOverflow = true;
+                
+                _volumeProvider = new NAudio.Wave.SampleProviders.VolumeSampleProvider(_waveProvider.ToSampleProvider());
+                _volumeProvider.Volume = 1.0f;
+                
                 _waveOut = new WaveOutEvent();
-                _waveOut.Init(_waveProvider);
-                _waveOut.Volume = 0.0f;
+                _waveOut.Init(_volumeProvider);
                 _waveOut.Play();
             }
             
@@ -195,26 +258,38 @@ namespace RadminStreamApp
         {
             var pc = new RTCPeerConnection(null);
             
+            // Both host and client need to know they support H264
+            var videoFormat = new SDPAudioVideoMediaFormat(new VideoFormat(VideoCodecsEnum.H264, 96));
+            var videoTrack = new MediaStreamTrack(SDPMediaTypesEnum.video, false, new List<SDPAudioVideoMediaFormat> { videoFormat });
+            pc.addTrack(videoTrack);
+
             if (_isHost)
             {
-                var videoFormat = new SDPAudioVideoMediaFormat(new VideoFormat(VideoCodecsEnum.VP8, 96));
-                var videoTrack = new MediaStreamTrack(SDPMediaTypesEnum.video, false, new List<SDPAudioVideoMediaFormat> { videoFormat });
-                pc.addTrack(videoTrack);
+                // Host only logic (no extra init needed for track right now)
             }
             else
             {
+                bool firstFrame = true;
                 pc.OnVideoFrameReceived += (IPEndPoint rep, uint timestamp, byte[] payload, VideoFormat format) =>
                 {
+                    if (firstFrame)
+                    {
+                        firstFrame = false;
+                        OnConnectionStateChanged?.Invoke("Decoding Video...");
+                    }
                     List<SIPSorceryMedia.Abstractions.VideoSample> samples = null;
                     lock (_encoderLock)
                     {
-                        if (_vpxEncoder != null)
+                        if (_videoEncoder != null)
                         {
                             try
                             {
-                                samples = _vpxEncoder.DecodeVideo(payload, VideoPixelFormatsEnum.Bgra, VideoCodecsEnum.VP8).ToList();
+                                samples = _videoEncoder.DecodeVideo(payload, VideoPixelFormatsEnum.Bgr, VideoCodecsEnum.H264).ToList();
                             }
-                            catch { }
+                            catch (Exception ex)
+                            {
+                                OnConnectionStateChanged?.Invoke($"Decode Error: {ex.Message}");
+                            }
                         }
                     }
                     if (samples != null && samples.Any())
@@ -222,7 +297,7 @@ namespace RadminStreamApp
                         var sample = samples.First();
                         if (sample.Sample != null)
                         {
-                            OnVideoFrameDecoded?.Invoke(sample.Sample, (int)sample.Width, (int)sample.Height, (int)(sample.Width * 4));
+                            OnVideoFrameDecoded?.Invoke(sample.Sample, (int)sample.Width, (int)sample.Height, (int)(sample.Width * 3));
                         }
                     }
                 };
@@ -230,8 +305,21 @@ namespace RadminStreamApp
 
             pc.onicecandidate += (candidate) =>
             {
+                if (candidate == null) return;
                 var msg = new SignalingMessage { Type = "ice", Data = candidate.toJSON(), SenderId = clientId };
                 OnLocalSdpReady?.Invoke(clientId, SignalingMessage.Serialize(msg));
+            };
+
+            pc.onconnectionstatechange += (state) =>
+            {
+                OnConnectionStateChanged?.Invoke(state.ToString());
+                if (state == RTCPeerConnectionState.connected && _isHost)
+                {
+                    lock (_encoderLock)
+                    {
+                        try { _videoEncoder?.ForceKeyFrame(); } catch { }
+                    }
+                }
             };
 
             lock (_peerConnections)
@@ -241,9 +329,11 @@ namespace RadminStreamApp
 
             if (_isHost)
             {
+                OnConnectionStateChanged?.Invoke("Creating Offer...");
                 var offer = pc.createOffer(null);
                 await pc.setLocalDescription(offer);
                 var msg = new SignalingMessage { Type = "offer", Data = offer.toJSON(), SenderId = clientId };
+                OnConnectionStateChanged?.Invoke("Sending Offer...");
                 OnLocalSdpReady?.Invoke(clientId, SignalingMessage.Serialize(msg));
             }
         }
@@ -285,27 +375,46 @@ namespace RadminStreamApp
 
             if (msg.Type == "offer")
             {
+                OnConnectionStateChanged?.Invoke("Received Offer");
                 if (RTCSessionDescriptionInit.TryParse(msg.Data, out var init))
                 {
+                    OnConnectionStateChanged?.Invoke("Parsed Offer, Setting Remote...");
                     var result = pc.setRemoteDescription(init);
                     if (result == SetDescriptionResultEnum.OK)
                     {
+                        OnConnectionStateChanged?.Invoke("Creating Answer...");
                         var answer = pc.createAnswer(null);
                         await pc.setLocalDescription(answer);
                         var answerMsg = new SignalingMessage { Type = "answer", Data = answer.toJSON(), SenderId = clientId };
+                        OnConnectionStateChanged?.Invoke("Sending Answer...");
                         OnLocalSdpReady?.Invoke(clientId, SignalingMessage.Serialize(answerMsg));
                     }
+                    else
+                    {
+                        OnConnectionStateChanged?.Invoke($"Failed to set Remote Offer: {result}");
+                    }
+                }
+                else
+                {
+                    OnConnectionStateChanged?.Invoke("Failed to parse Offer");
                 }
             }
             else if (msg.Type == "answer")
             {
+                OnConnectionStateChanged?.Invoke("Received Answer");
                 if (RTCSessionDescriptionInit.TryParse(msg.Data, out var init))
                 {
+                    OnConnectionStateChanged?.Invoke("Setting Remote Answer...");
                     pc.setRemoteDescription(init);
+                }
+                else
+                {
+                    OnConnectionStateChanged?.Invoke("Failed to parse Answer");
                 }
             }
             else if (msg.Type == "ice")
             {
+                OnConnectionStateChanged?.Invoke("Received ICE");
                 if (RTCIceCandidateInit.TryParse(msg.Data, out var candidate))
                 {
                     pc.addIceCandidate(candidate);
@@ -331,8 +440,8 @@ namespace RadminStreamApp
             }
             lock (_encoderLock)
             {
-                _vpxEncoder?.Dispose();
-                _vpxEncoder = null;
+                _videoEncoder?.Dispose();
+                _videoEncoder = null;
             }
         }
     }

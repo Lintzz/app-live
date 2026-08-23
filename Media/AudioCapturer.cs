@@ -150,7 +150,6 @@ namespace RadminStreamApp
         public event EncodedSampleDelegate OnAudioSourceEncodedSample = delegate {};
         public event RawAudioSampleDelegate OnAudioSourceRawSample = delegate {};
         public event SourceErrorDelegate OnAudioSourceError = delegate {};
-        public event Action<EncodedAudioFrame> OnAudioSourceEncodedFrameReady = delegate {};
         public event Action<byte[]> OnAudioFrameReady;
 
         public void Dispose()

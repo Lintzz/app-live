@@ -15,6 +15,12 @@ namespace RadminStreamApp
 
         private int _maxWidth = 1920;
         private int _maxHeight = 1080;
+        private bool _isMaxPerformance = true;
+
+        public void SetMaxPerformanceMode(bool isMaxPerformance)
+        {
+            _isMaxPerformance = isMaxPerformance;
+        }
 
         public void SetResolution(int width, int height)
         {
@@ -90,7 +96,7 @@ namespace RadminStreamApp
         public Task StartVideo()
         {
             _isCapturing = true;
-            // 60 FPS approx
+            // 60 FPS approx (16ms) - Mais fluido
             _timer = new System.Threading.Timer(CaptureFrame, null, 0, 16);
             return Task.CompletedTask;
         }
@@ -162,9 +168,9 @@ namespace RadminStreamApp
                 int scaledWidth = (int)(width * scale);
                 int scaledHeight = (int)(height * scale);
 
-                // Ensure even dimensions for I420
-                scaledWidth = scaledWidth % 2 == 0 ? scaledWidth : scaledWidth - 1;
-                scaledHeight = scaledHeight % 2 == 0 ? scaledHeight : scaledHeight - 1;
+                // Ensure dimensions are multiples of 4 to avoid stride padding
+                scaledWidth = scaledWidth - (scaledWidth % 4);
+                scaledHeight = scaledHeight - (scaledHeight % 4);
 
                 using (var fullBmp = new Bitmap(width, height, PixelFormat.Format32bppArgb))
                 {
@@ -209,7 +215,9 @@ namespace RadminStreamApp
                         finalBmp = new Bitmap(scaledWidth, scaledHeight, PixelFormat.Format32bppArgb);
                         using (var gScale = Graphics.FromImage(finalBmp))
                         {
-                            gScale.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.Low;
+                            gScale.InterpolationMode = _isMaxPerformance 
+                                ? System.Drawing.Drawing2D.InterpolationMode.NearestNeighbor 
+                                : System.Drawing.Drawing2D.InterpolationMode.Bilinear;
                             gScale.DrawImage(fullBmp, 0, 0, scaledWidth, scaledHeight);
                         }
                     }
@@ -222,7 +230,7 @@ namespace RadminStreamApp
                         byte[] rgbValues = new byte[bytes];
                         Marshal.Copy(bmpData.Scan0, rgbValues, 0, bytes);
                         finalBmp.UnlockBits(bmpData);
-                        OnVideoSourceRawSample?.Invoke((uint)TimeSpan.FromTicks(DateTime.Now.Ticks).TotalMilliseconds, scaledWidth, scaledHeight, rgbValues, VideoPixelFormatsEnum.Bgr);
+                        OnVideoSourceRawSample?.Invoke(16, scaledWidth, scaledHeight, rgbValues, VideoPixelFormatsEnum.Bgr);
                     }
 
                     if (scale < 1.0f)
