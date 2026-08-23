@@ -21,8 +21,6 @@ namespace RadminStreamApp
 
         public void Start(string ipAddress = "0.0.0.0", int port = 8080)
         {
-            if (_server != null) return;
-            
             _server = new WebSocketServer($"ws://{ipAddress}:{port}");
             _server.Start(socket =>
             {
@@ -78,16 +76,11 @@ namespace RadminStreamApp
 
         public void Stop()
         {
-            foreach (var client in _clients.ToArray())
+            foreach (var client in _clients)
             {
-                try { client.Close(); } catch { }
+                client.Close();
             }
-            _clients.Clear();
-            if (_server != null)
-            {
-                try { _server.Dispose(); } catch { }
-                _server = null;
-            }
+            _server?.Dispose();
         }
     }
 }

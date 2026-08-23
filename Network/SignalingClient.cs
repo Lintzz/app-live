@@ -14,8 +14,6 @@ namespace RadminStreamApp
         public event Action OnConnected = delegate {};
         public event Action OnDisconnected = delegate {};
 
-        public bool IsRunning => _client?.IsRunning ?? false;
-
         public async Task StartAsync(string ipAddress, int port = 8080)
         {
             var url = new Uri($"ws://{ipAddress}:{port}");

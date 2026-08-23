@@ -14,7 +14,6 @@ namespace RadminStreamApp
         private StreamManager _streamManager;
         private WriteableBitmap _writeableBitmap;
         private System.Windows.Threading.DispatcherTimer _mouseIdleTimer;
-        private bool _isClientInitialized = false;
 
         private string _downloadUrl;
 
@@ -100,7 +99,7 @@ namespace RadminStreamApp
                         UpdateViewerCount();
                     });
                 };
-                // Server will only be started when the stream actually starts
+                _server.Start("0.0.0.0", 8080);
                 UpdateViewerCount();
             }
         }
@@ -147,68 +146,90 @@ namespace RadminStreamApp
                 _streamManager = new StreamManager();
                 
                 _client.OnMessageReceived += async (message) => {
+                    if (message == "STREAM_STOPPED")
+                    {
+                        System.Windows.Application.Current.Dispatcher.Invoke(() => {
+                            try { _streamManager?.Stop(); } catch { }
+                            VideoPlayer.Source = null;
+                            StatusText.Text = "Transmissão Encerrada";
+                            StatusText.Visibility = Visibility.Visible;
+                        });
+                        return;
+                    }
+                    if (message == "STREAM_STARTED")
+                    {
+                        System.Windows.Application.Current.Dispatcher.Invoke(async () => {
+                            if (_streamManager != null)
+                            {
+                                try { _streamManager.Stop(); } catch { }
+                            }
+                            
+                            _streamManager = new StreamManager();
+                            
+                            _streamManager.OnVideoFrameDecoded += (pixelData, width, height, stride) => {
+                                StreamManager_OnVideoFrameDecoded(pixelData, width, height, stride);
+                                System.Windows.Application.Current.Dispatcher.InvokeAsync(() => {
+                                    StatusText.Visibility = Visibility.Collapsed;
+                                });
+                            };
+
+                            _streamManager.OnConnectionStateChanged += (state) => {
+                                System.Windows.Application.Current.Dispatcher.InvokeAsync(() => {
+                                    if (StatusText.Text == "Transmissão Encerrada" && (state.ToString() == "closed" || state.ToString() == "disconnected" || state.ToString() == "failed")) return;
+                                    StatusText.Text = $"WebRTC: {state}";
+                                    StatusText.Visibility = Visibility.Visible;
+                                });
+                            };
+
+                            _streamManager.OnLocalSdpReady += (clientId, sdpJson) => {
+                                _client?.SendMessage(sdpJson);
+                            };
+                            
+                            _streamManager.SetVolume((float)SliderVolume.Value / 100f);
+
+                            await _streamManager.InitializeClient();
+                            var msg = new SignalingMessage { Type = "CLIENT_CONNECTED", Data = "", SenderId = "client" };
+                            _client.SendMessage(System.Text.Json.JsonSerializer.Serialize(msg));
+                        });
+                        return;
+                    }
                     if (_streamManager != null)
                         await _streamManager.HandleSignalingMessage("host", message);
                 };
                 
                 _client.OnBinaryReceived += (data) => {
-                    _streamManager?.ProcessReceivedBinary(data);
+                    _streamManager.ProcessReceivedBinary(data);
                 };
 
-                _client.OnConnected += () => {
-                    System.Windows.Application.Current.Dispatcher.Invoke(async () => {
-                        if (_isClientInitialized) return;
-                        _isClientInitialized = true;
-                        
-                        if (_streamManager != null)
-                        {
-                            try { _streamManager.Stop(); } catch { }
-                        }
-                        
-                        _streamManager = new StreamManager();
-                        
-                        _streamManager.OnVideoFrameDecoded += (pixelData, width, height, stride) => {
-                            StreamManager_OnVideoFrameDecoded(pixelData, width, height, stride);
-                            System.Windows.Application.Current.Dispatcher.InvokeAsync(() => {
-                                StatusText.Visibility = Visibility.Collapsed;
-                            });
-                        };
+                // Sync initial volume
+                _streamManager.SetVolume((float)SliderVolume.Value / 100f);
 
-                        _streamManager.OnConnectionStateChanged += (state) => {
-                            System.Windows.Application.Current.Dispatcher.InvokeAsync(() => {
-                                if (StatusText.Text.Contains("Host Offline") && (state.ToString() == "closed" || state.ToString() == "disconnected" || state.ToString() == "failed")) return;
-                                StatusText.Text = $"WebRTC: {state}";
-                                StatusText.Visibility = Visibility.Visible;
-                            });
-                        };
-
-                        _streamManager.OnLocalSdpReady += (clientId, sdpJson) => {
-                            _client?.SendMessage(sdpJson);
-                        };
-                        
-                        _streamManager.SetVolume((float)SliderVolume.Value / 100f);
-
-                        await _streamManager.InitializeClient();
-                        var msg = new SignalingMessage { Type = "CLIENT_CONNECTED", Data = "", SenderId = "client" };
-                        _client.SendMessage(System.Text.Json.JsonSerializer.Serialize(msg));
+                _streamManager.OnVideoFrameDecoded += (pixelData, width, height, stride) => {
+                    StreamManager_OnVideoFrameDecoded(pixelData, width, height, stride);
+                    System.Windows.Application.Current.Dispatcher.InvokeAsync(() => {
+                        StatusText.Visibility = Visibility.Collapsed;
                     });
                 };
 
-                _client.OnDisconnected += () => {
-                    System.Windows.Application.Current.Dispatcher.Invoke(() => {
-                        _isClientInitialized = false;
-                        try { _streamManager?.Stop(); } catch { }
-                        VideoPlayer.Source = null;
-                        StatusText.Text = "Host Offline - Aguardando transmissão...";
+                _streamManager.OnConnectionStateChanged += (state) => {
+                    System.Windows.Application.Current.Dispatcher.InvokeAsync(() => {
+                        if (StatusText.Text == "Transmissão Encerrada" && (state.ToString() == "closed" || state.ToString() == "disconnected" || state.ToString() == "failed")) return;
+                        StatusText.Text = $"WebRTC: {state}";
                         StatusText.Visibility = Visibility.Visible;
                     });
+                };
+
+                _streamManager.OnLocalSdpReady += (clientId, sdpJson) => {
+                    _client?.SendMessage(sdpJson);
                 };
                 
                 try
                 {
+                    await _streamManager.InitializeClient();
                     await _client.StartAsync(ip, 8080);
                     
-
+                    var helloMsg = new SignalingMessage { Type = "CLIENT_CONNECTED", Data = "", SenderId = "client" };
+                    _client.SendMessage(System.Text.Json.JsonSerializer.Serialize(helloMsg));
 
                     BtnConnect.Content = "Connected";
                     BtnConnect.IsEnabled = false;
@@ -290,11 +311,15 @@ namespace RadminStreamApp
                 
                 _streamManager.OnLocalSdpReady += (clientId, sdpJson) => {
                     if (_server == null) return;
-                    foreach (var client in _server.Clients)
+                    var clients = _server.GetType().GetField("_clients", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)?.GetValue(_server) as System.Collections.Generic.List<Fleck.IWebSocketConnection>;
+                    if (clients != null)
                     {
-                        if (client.ConnectionInfo.Id.ToString() == clientId || clientId == "host")
+                        foreach (var client in clients)
                         {
-                            _server.SendMessage(client, sdpJson);
+                            if (client.ConnectionInfo.Id.ToString() == clientId || clientId == "host")
+                            {
+                                _server.SendMessage(client, sdpJson);
+                            }
                         }
                     }
                 };
@@ -324,14 +349,7 @@ namespace RadminStreamApp
                     _streamManager.InitializeHost();
                 });
                 
-                try
-                {
-                    _server?.Start("0.0.0.0", 8080);
-                }
-                catch (Exception ex)
-                {
-                    System.Windows.MessageBox.Show($"Erro ao iniciar servidor de rede: A porta 8080 já pode estar em uso por outra instância do programa. Detalhes: {ex.Message}", "Erro", MessageBoxButton.OK, MessageBoxImage.Error);
-                }
+                _server?.BroadcastMessage("STREAM_STARTED");
             }
             else
             {
@@ -341,13 +359,12 @@ namespace RadminStreamApp
 
         private void BtnStopStream_Click(object sender, RoutedEventArgs e)
         {
+            _server?.BroadcastMessage("STREAM_STOPPED");
             if (_streamManager != null)
             {
                 try { _streamManager.Stop(); } catch { }
                 _streamManager = null;
             }
-            _server?.Stop();
-            UpdateViewerCount();
             BtnStartStream.Content = "Start Stream";
             BtnStartStream.IsEnabled = true;
             BtnStopStream.IsEnabled = false;
