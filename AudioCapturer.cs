@@ -147,10 +147,10 @@ namespace RadminStreamApp
         public System.Collections.Generic.List<AudioFormat> GetAudioSourceFormats() => new System.Collections.Generic.List<AudioFormat>();
         public void SetAudioSourceFormat(AudioFormat audioFormat) { }
 
-        public event EncodedSampleDelegate OnAudioSourceEncodedSample;
-        public event RawAudioSampleDelegate OnAudioSourceRawSample;
-        public event SourceErrorDelegate OnAudioSourceError;
-        public event Action<EncodedAudioFrame> OnAudioSourceEncodedFrameReady;
+        public event EncodedSampleDelegate OnAudioSourceEncodedSample = delegate {};
+        public event RawAudioSampleDelegate OnAudioSourceRawSample = delegate {};
+        public event SourceErrorDelegate OnAudioSourceError = delegate {};
+        public event Action<EncodedAudioFrame> OnAudioSourceEncodedFrameReady = delegate {};
         public event Action<byte[]> OnAudioFrameReady;
 
         public void Dispose()

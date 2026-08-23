@@ -4,7 +4,8 @@
         Title="Radmin Stream Live" Height="550" Width="900"
         Background="#0F0F13"
         WindowStartupLocation="CenterScreen"
-        MouseLeftButtonDown="Window_MouseLeftButtonDown">
+        MouseLeftButtonDown="Window_MouseLeftButtonDown"
+        Icon="app_icon.ico">
     
     <WindowChrome.WindowChrome>
         <WindowChrome CaptionHeight="32" ResizeBorderThickness="5" GlassFrameThickness="0" CornerRadius="0"/>
@@ -166,10 +167,35 @@
             <Setter Property="BorderBrush" Value="#3D3D45"/>
             <Setter Property="Padding" Value="5"/>
         </Style>
+        <!-- Video Control Button Style -->
+        <Style x:Key="VideoControlButton" TargetType="Button">
+            <Setter Property="Background" Value="Transparent"/>
+            <Setter Property="Foreground" Value="#66FFFFFF"/>
+            <Setter Property="BorderThickness" Value="0"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border x:Name="border" Background="{TemplateBinding Background}" Padding="5">
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter Property="Foreground" Value="White"/>
+                            </Trigger>
+                            <Trigger Property="IsPressed" Value="True">
+                                <Setter Property="Foreground" Value="#AAAAAA"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
     </Window.Resources>
 
     <Grid>
         <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="*"/>
@@ -185,8 +211,27 @@
             </StackPanel>
         </Grid>
 
+        <!-- Update Banner -->
+        <Border x:Name="UpdateBanner" Grid.Row="1" Background="#CC2929" Margin="15,10,15,0" CornerRadius="8" Padding="10,5" Visibility="Collapsed">
+            <Grid>
+                <TextBlock x:Name="UpdateBannerText" Text="Uma nova versão está disponível!" Foreground="White" VerticalAlignment="Center" FontWeight="SemiBold"/>
+                <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
+                    <Button x:Name="BtnUpdate" Content="Atualizar Agora" Style="{StaticResource ModernButton}" Background="#1E1E24" Margin="0,0,10,0" Padding="10,2" Click="BtnUpdate_Click"/>
+                    <Button x:Name="BtnDismissUpdate" Content="&#xE106;" FontFamily="Segoe MDL2 Assets" Background="Transparent" Foreground="White" BorderThickness="0" Cursor="Hand" Click="BtnDismissUpdate_Click" ToolTip="Ignorar por enquanto" Margin="0,0,0,0">
+                        <Button.Template>
+                            <ControlTemplate TargetType="Button">
+                                <Border Background="Transparent" Padding="5">
+                                    <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                                </Border>
+                            </ControlTemplate>
+                        </Button.Template>
+                    </Button>
+                </StackPanel>
+            </Grid>
+        </Border>
+
         <!-- Top Panel (Controls) -->
-        <Border x:Name="TopPanel" Grid.Row="1" Margin="15,10,15,15" Background="#18181E" CornerRadius="8" Padding="15">
+        <Border x:Name="TopPanel" Grid.Row="2" Margin="15,10,15,15" Background="#18181E" CornerRadius="8" Padding="15">
             <StackPanel Orientation="Horizontal" HorizontalAlignment="Center">
                 
                 <StackPanel Orientation="Horizontal" Margin="0,0,20,0">
@@ -216,36 +261,42 @@
                     <TextBox x:Name="TxtHostIp" Style="{StaticResource ModernTextBox}" Width="110" Height="30" Margin="0,0,10,0" Text="127.0.0.1"/>
                     <Button x:Name="BtnConnect" Content="Connect" Style="{StaticResource PrimaryButton}" Margin="0,0,10,0" Click="BtnConnect_Click"/>
                     <Button x:Name="BtnDisconnect" Content="Disconnect" Style="{StaticResource DangerButton}" IsEnabled="False" Margin="0,0,10,0" Click="BtnDisconnect_Click"/>
-                    <TextBlock Text="Vol:" Foreground="#AAAAAA" VerticalAlignment="Center" Margin="10,0,5,0"/>
-                    <Slider x:Name="SliderVolume" Width="80" Minimum="0" Maximum="100" Value="0" VerticalAlignment="Center" Margin="0,0,10,0" ValueChanged="SliderVolume_ValueChanged"/>
                 </StackPanel>
 
-                <!-- Fullscreen and Theater Buttons -->
-                <StackPanel Orientation="Horizontal" Margin="20,0,0,0">
-                    <Button x:Name="BtnTheater" Content="Teatro" Style="{StaticResource ModernButton}" Margin="0,0,10,0" Click="BtnTheater_Click"/>
-                    <Button x:Name="BtnFullscreen" Content="Fullscreen" Style="{StaticResource ModernButton}" Click="BtnFullscreen_Click"/>
-                </StackPanel>
             </StackPanel>
         </Border>
 
         <!-- Video Player -->
-        <Border x:Name="VideoBorder" Grid.Row="2" Background="#0F0F13" Margin="15,0,15,15" CornerRadius="8" ClipToBounds="True">
+        <Border x:Name="VideoBorder" Grid.Row="3" Background="#0F0F13" Margin="15,0,15,15" CornerRadius="8" ClipToBounds="True">
             <Grid>
                 <TextBlock x:Name="StatusText" Text="No Signal" Foreground="#222222" FontSize="24" FontWeight="Bold" HorizontalAlignment="Center" VerticalAlignment="Center"/>
                 <Image x:Name="VideoPlayer" Stretch="Uniform" MouseDown="VideoPlayer_MouseDown"/>
+                
+                <StackPanel x:Name="VideoControlsPanel" Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Bottom" Margin="10">
+                    <TextBlock x:Name="IconVolume" Visibility="Collapsed" Text="&#xE767;" FontFamily="Segoe MDL2 Assets" Foreground="#66FFFFFF" FontSize="18" VerticalAlignment="Center" Margin="0,0,5,0"/>
+                    <Slider x:Name="SliderVolume" Visibility="Collapsed" Width="80" Minimum="0" Maximum="100" Value="50" VerticalAlignment="Center" Margin="0,0,15,0" ValueChanged="SliderVolume_ValueChanged"/>
+                    
+                    <Button x:Name="BtnSettings" Visibility="Collapsed" Style="{StaticResource VideoControlButton}" ToolTip="Qualidade do Vídeo" Click="BtnSettings_Click">
+                        <Button.ContextMenu>
+                            <ContextMenu Background="#1E1E24" Foreground="White" BorderBrush="#3D3D45">
+                                <MenuItem Header="1080p (Alta)" Click="MenuItemQuality_Click" Tag="1080p"/>
+                            </ContextMenu>
+                        </Button.ContextMenu>
+                        <StackPanel Orientation="Horizontal">
+                            <TextBlock Text="&#xE713;" FontFamily="Segoe MDL2 Assets" FontSize="18" VerticalAlignment="Center"/>
+                            <Border x:Name="BadgeHD" Background="#E50000" CornerRadius="2" Margin="2,0,0,0" Padding="2,0" VerticalAlignment="Center" Height="14">
+                                <TextBlock x:Name="TextHD" Text="HD" Foreground="White" FontSize="9" FontWeight="Bold" VerticalAlignment="Center"/>
+                            </Border>
+                        </StackPanel>
+                    </Button>
+                    <Button x:Name="BtnTheater" Visibility="Collapsed" Style="{StaticResource VideoControlButton}" Content="&#xE7F4;" FontFamily="Segoe MDL2 Assets" FontSize="18" ToolTip="Modo Teatro" Click="BtnTheater_Click" Margin="10,0,0,0"/>
+                    <Button x:Name="BtnFullscreen" Visibility="Collapsed" Style="{StaticResource VideoControlButton}" Content="&#xE740;" FontFamily="Segoe MDL2 Assets" FontSize="18" ToolTip="Tela Cheia" Click="BtnFullscreen_Click" Margin="10,0,0,0"/>
+                </StackPanel>
             </Grid>
         </Border>
 
-        <!-- Floating Exit Fullscreen Button Overlay -->
-        <Grid x:Name="OverlayGrid" Grid.RowSpan="3" Background="Transparent" Visibility="Collapsed">
-            
-            <StackPanel x:Name="FullscreenControls" Orientation="Horizontal" VerticalAlignment="Top" HorizontalAlignment="Center" Margin="0,20,0,0" Visibility="Collapsed">
-                <Button x:Name="BtnExitFullscreen" Content="Sair da Tela Cheia" 
-                        Style="{StaticResource ModernButton}"
-                        Width="160" Height="40" FontSize="14" Click="BtnExitFullscreen_Click" Margin="0,0,20,0"/>
-                <TextBlock Text="Volume:" Foreground="White" VerticalAlignment="Center" Margin="0,0,10,0" FontWeight="SemiBold" FontSize="14"/>
-                <Slider x:Name="SliderFullscreenVolume" Width="120" Minimum="0" Maximum="100" Value="{Binding ElementName=SliderVolume, Path=Value, Mode=TwoWay}" VerticalAlignment="Center" ValueChanged="SliderVolume_ValueChanged"/>
-            </StackPanel>
+        <!-- Floating Overlay for Mouse Activity -->
+        <Grid x:Name="OverlayGrid" Grid.RowSpan="4" Background="Transparent" Visibility="Collapsed">
         </Grid>
     </Grid>
 </Window>

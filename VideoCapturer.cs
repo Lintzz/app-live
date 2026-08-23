@@ -13,8 +13,17 @@ namespace RadminStreamApp
         private System.Threading.Timer _timer;
         private CaptureSource _captureSource;
 
+        private int _maxWidth = 1920;
+        private int _maxHeight = 1080;
+
+        public void SetResolution(int width, int height)
+        {
+            _maxWidth = width;
+            _maxHeight = height;
+        }
+
         public event RawVideoSampleDelegate OnVideoSourceRawSample;
-        public event EncodedSampleDelegate OnVideoSourceEncodedSample;
+        public event EncodedSampleDelegate OnVideoSourceEncodedSample = delegate {};
 
         [StructLayout(LayoutKind.Sequential)]
         struct POINT
@@ -81,8 +90,8 @@ namespace RadminStreamApp
         public Task StartVideo()
         {
             _isCapturing = true;
-            // 24 FPS approx
-            _timer = new System.Threading.Timer(CaptureFrame, null, 0, 41);
+            // 60 FPS approx
+            _timer = new System.Threading.Timer(CaptureFrame, null, 0, 16);
             return Task.CompletedTask;
         }
 
@@ -105,7 +114,6 @@ namespace RadminStreamApp
             return Task.CompletedTask;
         }
 
-        public event Action<byte[]> OnJpegFrameReady;
 
         private void CaptureFrame(object state)
         {
@@ -139,96 +147,87 @@ namespace RadminStreamApp
 
                 if (width <= 0 || height <= 0) return;
 
-                // Ensure even dimensions for I420
-                width = width % 2 == 0 ? width : width - 1;
-                height = height % 2 == 0 ? height : height - 1;
-
-                using (var bmp = new Bitmap(width, height, PixelFormat.Format32bppArgb))
+                // Scale down if larger than max resolution
+                int maxWidth = _maxWidth;
+                int maxHeight = _maxHeight;
+                
+                float scale = 1.0f;
+                if (width > maxWidth || height > maxHeight)
                 {
-                    using (var g = Graphics.FromImage(bmp))
+                    float scaleX = (float)maxWidth / width;
+                    float scaleY = (float)maxHeight / height;
+                    scale = Math.Min(scaleX, scaleY);
+                }
+
+                int scaledWidth = (int)(width * scale);
+                int scaledHeight = (int)(height * scale);
+
+                // Ensure even dimensions for I420
+                scaledWidth = scaledWidth % 2 == 0 ? scaledWidth : scaledWidth - 1;
+                scaledHeight = scaledHeight % 2 == 0 ? scaledHeight : scaledHeight - 1;
+
+                using (var fullBmp = new Bitmap(width, height, PixelFormat.Format32bppArgb))
+                {
+                    using (var gFull = Graphics.FromImage(fullBmp))
                     {
                         if (_captureSource.IsScreen)
                         {
-                            g.CopyFromScreen(left, top, 0, 0, new Size(width, height), CopyPixelOperation.SourceCopy);
+                            gFull.CopyFromScreen(left, top, 0, 0, new Size(width, height), CopyPixelOperation.SourceCopy);
                         }
                         else
                         {
-                            // Clear background in case window doesn't draw fully
-                            g.Clear(Color.Black);
-                            IntPtr hdc = g.GetHdc();
-                            try
-                            {
-                                // Capture window specifically (ignores overlapping windows)
-                                PrintWindow(_captureSource.Hwnd, hdc, PW_RENDERFULLCONTENT);
-                            }
-                            finally
-                            {
-                                g.ReleaseHdc(hdc);
-                            }
+                            gFull.Clear(Color.Black);
+                            IntPtr hdc = gFull.GetHdc();
+                            try { PrintWindow(_captureSource.Hwnd, hdc, PW_RENDERFULLCONTENT); }
+                            finally { gFull.ReleaseHdc(hdc); }
                         }
 
                         // Draw mouse cursor
                         CURSORINFO pci;
                         pci.cbSize = Marshal.SizeOf(typeof(CURSORINFO));
-                        if (GetCursorInfo(out pci))
+                        if (GetCursorInfo(out pci) && pci.flags == CURSOR_SHOWING)
                         {
-                            if (pci.flags == CURSOR_SHOWING)
+                            int cursorX = pci.ptScreenPos.x - left;
+                            int cursorY = pci.ptScreenPos.y - top;
+                            ICONINFO ii;
+                            if (GetIconInfo(pci.hCursor, out ii))
                             {
-                                int cursorX = pci.ptScreenPos.x - left;
-                                int cursorY = pci.ptScreenPos.y - top;
-
-                                ICONINFO ii;
-                                if (GetIconInfo(pci.hCursor, out ii))
-                                {
-                                    cursorX -= ii.xHotspot;
-                                    cursorY -= ii.yHotspot;
-                                    
-                                    if (ii.hbmMask != IntPtr.Zero) DeleteObject(ii.hbmMask);
-                                    if (ii.hbmColor != IntPtr.Zero) DeleteObject(ii.hbmColor);
-                                }
-
-                                IntPtr hdcCursor = g.GetHdc();
-                                try
-                                {
-                                    DrawIcon(hdcCursor, cursorX, cursorY, pci.hCursor);
-                                }
-                                finally
-                                {
-                                    g.ReleaseHdc(hdcCursor);
-                                }
+                                cursorX -= ii.xHotspot;
+                                cursorY -= ii.yHotspot;
+                                if (ii.hbmMask != IntPtr.Zero) DeleteObject(ii.hbmMask);
+                                if (ii.hbmColor != IntPtr.Zero) DeleteObject(ii.hbmColor);
                             }
+                            IntPtr hdcCursor = gFull.GetHdc();
+                            try { DrawIcon(hdcCursor, cursorX, cursorY, pci.hCursor); }
+                            finally { gFull.ReleaseHdc(hdcCursor); }
                         }
                     }
 
-                    // Convert to raw bytes to send to SIPSorcery Encoder
+                    Bitmap finalBmp = fullBmp;
+                    if (scale < 1.0f)
+                    {
+                        finalBmp = new Bitmap(scaledWidth, scaledHeight, PixelFormat.Format32bppArgb);
+                        using (var gScale = Graphics.FromImage(finalBmp))
+                        {
+                            gScale.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.Low;
+                            gScale.DrawImage(fullBmp, 0, 0, scaledWidth, scaledHeight);
+                        }
+                    }
+
                     if (OnVideoSourceRawSample != null)
                     {
-                        var bmpData = bmp.LockBits(new Rectangle(0, 0, width, height), ImageLockMode.ReadOnly, PixelFormat.Format24bppRgb);
+                        var bmpData = finalBmp.LockBits(new Rectangle(0, 0, scaledWidth, scaledHeight), ImageLockMode.ReadOnly, PixelFormat.Format24bppRgb);
                         int stride = bmpData.Stride;
-                        int bytes = Math.Abs(stride) * height;
+                        int bytes = Math.Abs(stride) * scaledHeight;
                         byte[] rgbValues = new byte[bytes];
                         Marshal.Copy(bmpData.Scan0, rgbValues, 0, bytes);
-                        bmp.UnlockBits(bmpData);
-                        OnVideoSourceRawSample?.Invoke((uint)TimeSpan.FromTicks(DateTime.Now.Ticks).TotalMilliseconds, width, height, rgbValues, VideoPixelFormatsEnum.Bgr);
+                        finalBmp.UnlockBits(bmpData);
+                        OnVideoSourceRawSample?.Invoke((uint)TimeSpan.FromTicks(DateTime.Now.Ticks).TotalMilliseconds, scaledWidth, scaledHeight, rgbValues, VideoPixelFormatsEnum.Bgr);
                     }
 
-                    if (OnJpegFrameReady != null)
+                    if (scale < 1.0f)
                     {
-                        using (var ms = new System.IO.MemoryStream())
-                        {
-                            var jpegEncoder = GetEncoderInfo("image/jpeg");
-                            if (jpegEncoder != null)
-                            {
-                                var encoderParams = new EncoderParameters(1);
-                                encoderParams.Param[0] = new EncoderParameter(System.Drawing.Imaging.Encoder.Quality, 70L);
-                                bmp.Save(ms, jpegEncoder, encoderParams);
-                            }
-                            else
-                            {
-                                bmp.Save(ms, ImageFormat.Jpeg);
-                            }
-                            OnJpegFrameReady?.Invoke(ms.ToArray());
-                        }
+                        finalBmp.Dispose();
                     }
                 }
             }
@@ -242,15 +241,6 @@ namespace RadminStreamApp
             }
         }
         
-        private System.Drawing.Imaging.ImageCodecInfo GetEncoderInfo(string mimeType)
-        {
-            var codecs = System.Drawing.Imaging.ImageCodecInfo.GetImageEncoders();
-            foreach (var codec in codecs)
-            {
-                if (codec.MimeType == mimeType) return codec;
-            }
-            return null;
-        }
 
         public void Dispose()
         {
@@ -267,7 +257,7 @@ namespace RadminStreamApp
         public void RestrictFormats(Func<VideoFormat, bool> filter) { }
         public void ExternalVideoSourceRawSampleFaster(uint durationMilliseconds, RawImage sample) { }
         public bool IsVideoSourcePaused() => !_isCapturing;
-        public event RawVideoSampleFasterDelegate OnVideoSourceRawSampleFaster;
-        public event SourceErrorDelegate OnVideoSourceError;
+        public event RawVideoSampleFasterDelegate OnVideoSourceRawSampleFaster = delegate {};
+        public event SourceErrorDelegate OnVideoSourceError = delegate {};
     }
 }

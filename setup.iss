@@ -1,24 +1,24 @@
+#define MyAppVersion GetFileVersion("publish_zip\RadminStreamApp.exe")
 [Setup]
-AppName=Radmin Stream
-AppVersion=1.0
-DefaultDirName={autopf}\Radmin Stream
-DefaultGroupName=Radmin Stream
-OutputDir=D:\Projetos em andameto\app-live
-OutputBaseFilename=RadminStream_Setup
-Compression=lzma
+AppName=Radmin Stream Live
+AppVersion={#MyAppVersion}
+DefaultDirName={pf}\Radmin Stream Live
+DefaultGroupName=Radmin Stream Live
+UninstallDisplayIcon={app}\RadminStreamApp.exe
+Compression=lzma2
 SolidCompression=yes
+OutputDir=.
+OutputBaseFilename=RadminStream_Setup
 ArchitecturesAllowed=x64
 ArchitecturesInstallIn64BitMode=x64
-
-[Tasks]
-Name: "desktopicon"; Description: "Criar um atalho na Área de Trabalho"; GroupDescription: "Atalhos adicionais:"
+SetupIconFile=app_icon.ico
 
 [Files]
-Source: "D:\Projetos em andameto\app-live\publish_zip\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "publish_zip\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
-Name: "{group}\Radmin Stream"; Filename: "{app}\RadminStreamApp.exe"
-Name: "{autodesktop}\Radmin Stream"; Filename: "{app}\RadminStreamApp.exe"; Tasks: desktopicon
+Name: "{group}\Radmin Stream Live"; Filename: "{app}\RadminStreamApp.exe"
+Name: "{commondesktop}\Radmin Stream Live"; Filename: "{app}\RadminStreamApp.exe"
 
 [Run]
-Filename: "{app}\RadminStreamApp.exe"; Description: "Iniciar o Radmin Stream agora"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\RadminStreamApp.exe"; Description: "Launch Radmin Stream Live"; Flags: nowait postinstall skipifsilent

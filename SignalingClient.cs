@@ -9,10 +9,10 @@ namespace RadminStreamApp
     {
         private WebsocketClient _client;
 
-        public event Action<string> OnMessageReceived;
-        public event Action<byte[]> OnBinaryReceived;
-        public event Action OnConnected;
-        public event Action OnDisconnected;
+        public event Action<string> OnMessageReceived = delegate {};
+        public event Action<byte[]> OnBinaryReceived = delegate {};
+        public event Action OnConnected = delegate {};
+        public event Action OnDisconnected = delegate {};
 
         public async Task StartAsync(string ipAddress, int port = 8080)
         {
@@ -21,12 +21,12 @@ namespace RadminStreamApp
 
             _client.MessageReceived.Subscribe(msg =>
             {
-                if (msg.MessageType == System.Net.WebSockets.WebSocketMessageType.Text)
+                if (msg.MessageType == System.Net.WebSockets.WebSocketMessageType.Text && msg.Text != null)
                 {
                     Debug.WriteLine($"[Client] Message received: {msg.Text.Substring(0, Math.Min(msg.Text.Length, 50))}...");
                     OnMessageReceived?.Invoke(msg.Text);
                 }
-                else if (msg.MessageType == System.Net.WebSockets.WebSocketMessageType.Binary)
+                else if (msg.MessageType == System.Net.WebSockets.WebSocketMessageType.Binary && msg.Binary != null)
                 {
                     OnBinaryReceived?.Invoke(msg.Binary);
                 }

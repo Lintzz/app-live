@@ -15,6 +15,8 @@ namespace RadminStreamApp
         private WriteableBitmap _writeableBitmap;
         private System.Windows.Threading.DispatcherTimer _mouseIdleTimer;
 
+        private string _downloadUrl;
+
         public MainWindow()
         {
             InitializeComponent();
@@ -23,6 +25,34 @@ namespace RadminStreamApp
             _mouseIdleTimer.Interval = TimeSpan.FromSeconds(3);
             _mouseIdleTimer.Tick += MouseIdleTimer_Tick;
             this.MouseMove += MainWindow_MouseMove;
+            this.Loaded += MainWindow_Loaded;
+        }
+
+        private async void MainWindow_Loaded(object sender, RoutedEventArgs e)
+        {
+            var updateResult = await UpdateManager.CheckForUpdatesAsync();
+            if (updateResult.HasUpdate)
+            {
+                _downloadUrl = updateResult.DownloadUrl;
+                UpdateBannerText.Text = $"Uma nova versão ({updateResult.LatestVersion}) está disponível!";
+                UpdateBanner.Visibility = Visibility.Visible;
+            }
+        }
+
+        private async void BtnUpdate_Click(object sender, RoutedEventArgs e)
+        {
+            if (!string.IsNullOrEmpty(_downloadUrl))
+            {
+                BtnUpdate.Content = "Baixando...";
+                BtnUpdate.IsEnabled = false;
+                BtnDismissUpdate.IsEnabled = false;
+                await UpdateManager.DownloadAndInstallUpdateAsync(_downloadUrl);
+            }
+        }
+
+        private void BtnDismissUpdate_Click(object sender, RoutedEventArgs e)
+        {
+            UpdateBanner.Visibility = Visibility.Collapsed;
         }
 
         private void CboWindows_DropDownOpened(object sender, EventArgs e)
@@ -40,8 +70,18 @@ namespace RadminStreamApp
 
         private void BtnHost_Click(object sender, RoutedEventArgs e)
         {
+            BtnClient.Visibility = Visibility.Visible;
+            BtnClient.IsEnabled = true;
+            BtnHost.IsEnabled = false;
+
             PanelHost.Visibility = Visibility.Visible;
             PanelClient.Visibility = Visibility.Collapsed;
+            
+            IconVolume.Visibility = Visibility.Collapsed;
+            SliderVolume.Visibility = Visibility.Collapsed;
+            BtnSettings.Visibility = Visibility.Collapsed;
+            BtnTheater.Visibility = Visibility.Collapsed;
+            BtnFullscreen.Visibility = Visibility.Collapsed;
             
             CboWindows.ItemsSource = WindowHelper.GetCapturableWindows();
 
@@ -55,43 +95,29 @@ namespace RadminStreamApp
                     });
                 };
                 _server.Start("0.0.0.0", 8080);
-                
-                _streamManager = new StreamManager();
-                _streamManager.OnAudioCaptureError += (error) => {
-                    System.Windows.Application.Current.Dispatcher.Invoke(() => {
-                        System.Windows.MessageBox.Show(error, "Aviso - Captura de Áudio", 
-                            MessageBoxButton.OK, MessageBoxImage.Warning);
-                    });
-                };
-                _streamManager.OnLocalSdpReady += (sdp) => {
-                    // Send SDP/ICE to all clients (in a real app, send to specific client)
-                    foreach (var client in _server.GetType().GetField("_clients", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance).GetValue(_server) as System.Collections.Generic.List<Fleck.IWebSocketConnection>)
-                    {
-                        _server.SendMessage(client, sdp);
-                    }
-                };
-
-                _streamManager.OnBinaryDataReady += (data) => {
-                    _server.BroadcastBinary(data);
-                    if (data.Length > 0 && data[0] == 0) // Local preview only needs video
-                    {
-                        var jpeg = new byte[data.Length - 1];
-                        Buffer.BlockCopy(data, 1, jpeg, 0, jpeg.Length);
-                        ShowFrameLocally(jpeg);
-                    }
-                };
             }
         }
 
-        private void Server_OnMessageReceived(Fleck.IWebSocketConnection socket, string message)
+        private async void Server_OnMessageReceived(Fleck.IWebSocketConnection socket, string message)
         {
-            _streamManager.SetRemoteDescription(message);
+            if (_streamManager != null)
+                await _streamManager.HandleSignalingMessage(socket.ConnectionInfo.Id.ToString(), message);
         }
 
         private void BtnClient_Click(object sender, RoutedEventArgs e)
         {
+            BtnHost.Visibility = Visibility.Visible;
+            BtnHost.IsEnabled = true;
+            BtnClient.IsEnabled = false;
+
             PanelHost.Visibility = Visibility.Collapsed;
             PanelClient.Visibility = Visibility.Visible;
+            
+            IconVolume.Visibility = Visibility.Visible;
+            SliderVolume.Visibility = Visibility.Visible;
+            BtnSettings.Visibility = Visibility.Visible;
+            BtnTheater.Visibility = Visibility.Visible;
+            BtnFullscreen.Visibility = Visibility.Visible;
         }
 
         private async void BtnConnect_Click(object sender, RoutedEventArgs e)
@@ -104,7 +130,7 @@ namespace RadminStreamApp
                 _client = new SignalingClient();
                 _streamManager = new StreamManager();
                 
-                _client.OnMessageReceived += (message) => {
+                _client.OnMessageReceived += async (message) => {
                     if (message == "STREAM_STOPPED")
                     {
                         System.Windows.Application.Current.Dispatcher.Invoke(() => {
@@ -114,25 +140,44 @@ namespace RadminStreamApp
                         });
                         return;
                     }
-                    _streamManager.SetRemoteDescription(message);
+                    if (message == "STREAM_STARTED")
+                    {
+                        if (_streamManager != null)
+                        {
+                            await _streamManager.InitializeClient();
+                            var msg = new SignalingMessage { Type = "CLIENT_CONNECTED", Data = "", SenderId = "client" };
+                            _client.SendMessage(System.Text.Json.JsonSerializer.Serialize(msg));
+                        }
+                        return;
+                    }
+                    if (_streamManager != null)
+                        await _streamManager.HandleSignalingMessage("host", message);
                 };
                 
                 _client.OnBinaryReceived += (data) => {
                     _streamManager.ProcessReceivedBinary(data);
                 };
 
-                _streamManager.OnJpegFrameReceived += (jpeg) => {
-                    ShowFrameLocally(jpeg);
+                _streamManager.OnVideoFrameDecoded += (pixelData, width, height, stride) => {
+                    StreamManager_OnVideoFrameDecoded(pixelData, width, height, stride);
+                    System.Windows.Application.Current.Dispatcher.InvokeAsync(() => {
+                        StatusText.Visibility = Visibility.Collapsed;
+                    });
                 };
                 
                 try
                 {
                     await _streamManager.InitializeClient();
                     await _client.StartAsync(ip, 8080);
+                    
+                    var helloMsg = new SignalingMessage { Type = "CLIENT_CONNECTED", Data = "", SenderId = "client" };
+                    _client.SendMessage(System.Text.Json.JsonSerializer.Serialize(helloMsg));
+
                     BtnConnect.Content = "Connected";
                     BtnConnect.IsEnabled = false;
                     BtnDisconnect.IsEnabled = true;
                     TxtHostIp.IsEnabled = false;
+                    BtnHost.Visibility = Visibility.Collapsed;
                 }
                 catch (Exception ex)
                 {
@@ -141,27 +186,20 @@ namespace RadminStreamApp
             }
         }
 
-        private void ShowFrameLocally(byte[] jpegBytes)
+        private void StreamManager_OnLocalVideoFrameReady(byte[] pixelData, int width, int height, int stride)
         {
             System.Windows.Application.Current.Dispatcher.InvokeAsync(() =>
             {
-                try
+                if (_writeableBitmap == null || _writeableBitmap.PixelWidth != width || _writeableBitmap.PixelHeight != height || _writeableBitmap.Format != PixelFormats.Bgr24)
                 {
-                    using (var ms = new System.IO.MemoryStream(jpegBytes))
-                    {
-                        var bitmapImage = new BitmapImage();
-                        bitmapImage.BeginInit();
-                        bitmapImage.CacheOption = BitmapCacheOption.OnLoad;
-                        bitmapImage.StreamSource = ms;
-                        bitmapImage.EndInit();
-                        VideoPlayer.Source = bitmapImage;
-                        StatusText.Visibility = Visibility.Collapsed;
-                    }
+                    _writeableBitmap = new WriteableBitmap(width, height, 96, 96, PixelFormats.Bgr24, null);
+                    VideoPlayer.Source = _writeableBitmap;
                 }
-                catch
-                {
-                    // Ignore broken frames
-                }
+
+                _writeableBitmap.Lock();
+                Marshal.Copy(pixelData, 0, _writeableBitmap.BackBuffer, pixelData.Length);
+                _writeableBitmap.AddDirtyRect(new Int32Rect(0, 0, width, height));
+                _writeableBitmap.Unlock();
             });
         }
 
@@ -196,12 +234,55 @@ namespace RadminStreamApp
                 BtnStartStream.IsEnabled = false;
                 BtnStopStream.IsEnabled = true;
                 CboWindows.IsEnabled = false;
+                BtnClient.Visibility = Visibility.Collapsed;
+
+                if (_streamManager != null)
+                {
+                    _streamManager.Stop();
+                }
+
+                _streamManager = new StreamManager();
+                
+                _streamManager.OnAudioCaptureError += (error) => {
+                    System.Windows.Application.Current.Dispatcher.Invoke(() => {
+                        System.Windows.MessageBox.Show(error, "Aviso - Captura de Áudio", 
+                            MessageBoxButton.OK, MessageBoxImage.Warning);
+                    });
+                };
+                
+                _streamManager.OnLocalSdpReady += (clientId, sdpJson) => {
+                    if (_server == null) return;
+                    var clients = _server.GetType().GetField("_clients", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)?.GetValue(_server) as System.Collections.Generic.List<Fleck.IWebSocketConnection>;
+                    if (clients != null)
+                    {
+                        foreach (var client in clients)
+                        {
+                            if (client.ConnectionInfo.Id.ToString() == clientId || clientId == "host")
+                            {
+                                _server.SendMessage(client, sdpJson);
+                            }
+                        }
+                    }
+                };
+
+                _streamManager.OnBinaryDataReady += (data) => {
+                    _server?.BroadcastBinary(data);
+                };
+
+                _streamManager.OnLocalVideoFrameReady += (pixelData, width, height, stride) => {
+                    StreamManager_OnLocalVideoFrameReady(pixelData, width, height, stride);
+                    System.Windows.Application.Current.Dispatcher.InvokeAsync(() => {
+                        StatusText.Visibility = Visibility.Collapsed;
+                    });
+                };
 
                 await System.Threading.Tasks.Task.Run(() => 
                 {
                     _streamManager.SetTargetSource(selectedSource);
                     _streamManager.InitializeHost();
                 });
+                
+                _server?.BroadcastMessage("STREAM_STARTED");
             }
             else
             {
@@ -211,13 +292,19 @@ namespace RadminStreamApp
 
         private void BtnStopStream_Click(object sender, RoutedEventArgs e)
         {
-            _streamManager.Stop();
+            if (_streamManager != null)
+            {
+                _streamManager.Stop();
+                _streamManager = null;
+            }
             _server?.BroadcastMessage("STREAM_STOPPED");
             BtnStartStream.Content = "Start Stream";
             BtnStartStream.IsEnabled = true;
             BtnStopStream.IsEnabled = false;
             CboWindows.IsEnabled = true;
+            BtnClient.Visibility = Visibility.Visible;
             VideoPlayer.Source = null;
+            _writeableBitmap = null;
             StatusText.Text = "No Signal";
             StatusText.Visibility = Visibility.Visible;
         }
@@ -234,7 +321,9 @@ namespace RadminStreamApp
             BtnConnect.IsEnabled = true;
             BtnDisconnect.IsEnabled = false;
             TxtHostIp.IsEnabled = true;
+            BtnHost.Visibility = Visibility.Visible;
             VideoPlayer.Source = null;
+            _writeableBitmap = null;
             StatusText.Text = "No Signal";
             StatusText.Visibility = Visibility.Visible;
         }
@@ -249,7 +338,10 @@ namespace RadminStreamApp
 
         private void BtnFullscreen_Click(object sender, RoutedEventArgs e)
         {
-            EnterFullscreen();
+            if (WindowStyle == WindowStyle.None)
+                ExitFullscreen();
+            else
+                EnterFullscreen();
         }
 
         private void VideoPlayer_MouseDown(object sender, System.Windows.Input.MouseButtonEventArgs e)
@@ -297,14 +389,50 @@ namespace RadminStreamApp
             VideoBorder.CornerRadius = new CornerRadius(8);
         }
 
-        private void BtnTheater_Click(object sender, RoutedEventArgs e)
+        private void BtnSettings_Click(object sender, RoutedEventArgs e)
         {
-            EnterTheaterMode();
+            if (BtnSettings.ContextMenu != null)
+            {
+                BtnSettings.ContextMenu.PlacementTarget = BtnSettings;
+                BtnSettings.ContextMenu.Placement = System.Windows.Controls.Primitives.PlacementMode.Top;
+                BtnSettings.ContextMenu.IsOpen = true;
+            }
         }
 
-        private void BtnExitFullscreen_Click(object sender, RoutedEventArgs e)
+        private void MenuItemQuality_Click(object sender, RoutedEventArgs e)
         {
-            ExitFullscreen();
+            if (sender is System.Windows.Controls.MenuItem menuItem && menuItem.Tag is string quality)
+            {
+                if (quality == "1080p" || quality == "720p")
+                {
+                    BadgeHD.Visibility = Visibility.Visible;
+                    TextHD.Text = "HD";
+                }
+                else
+                {
+                    BadgeHD.Visibility = Visibility.Collapsed;
+                }
+
+                if (_client != null)
+                {
+                    var msg = new SignalingMessage { Type = "SET_QUALITY", Data = quality, SenderId = "client" };
+                    _client.SendMessage(System.Text.Json.JsonSerializer.Serialize(msg));
+                }
+                else if (_streamManager != null)
+                {
+                    if (quality == "1080p") _streamManager.SetResolution(1920, 1080);
+                    else if (quality == "720p") _streamManager.SetResolution(1280, 720);
+                    else if (quality == "480p") _streamManager.SetResolution(854, 480);
+                }
+            }
+        }
+
+        private void BtnTheater_Click(object sender, RoutedEventArgs e)
+        {
+            if (WindowStyle == WindowStyle.None)
+                ExitFullscreen();
+            else
+                EnterTheaterMode();
         }
 
         private void Window_MouseLeftButtonDown(object sender, System.Windows.Input.MouseButtonEventArgs e)
@@ -317,26 +445,22 @@ namespace RadminStreamApp
 
         private void MainWindow_MouseMove(object sender, System.Windows.Input.MouseEventArgs e)
         {
-            if (OverlayGrid.Visibility == Visibility.Visible)
+            if (VideoControlsPanel != null)
             {
-                FullscreenControls.Visibility = Visibility.Visible;
+                VideoControlsPanel.Visibility = Visibility.Visible;
                 Cursor = System.Windows.Input.Cursors.Arrow;
                 _mouseIdleTimer.Stop();
                 _mouseIdleTimer.Start();
-            }
-            else
-            {
-                Cursor = System.Windows.Input.Cursors.Arrow;
             }
         }
 
         private void MouseIdleTimer_Tick(object sender, EventArgs e)
         {
             _mouseIdleTimer.Stop();
-            if (OverlayGrid.Visibility == Visibility.Visible)
+            if (VideoControlsPanel != null)
             {
-                FullscreenControls.Visibility = Visibility.Collapsed;
-                Cursor = System.Windows.Input.Cursors.None;
+                VideoControlsPanel.Visibility = Visibility.Collapsed;
+                if (WindowStyle == WindowStyle.None) Cursor = System.Windows.Input.Cursors.None;
             }
         }
 
