@@ -15,3 +15,4 @@ RadminStream_Setup.exe
 
 # Gerado pelo build a partir de <Version> no .csproj
 version.iss
+RadminStream_Setup.exe.sha256
