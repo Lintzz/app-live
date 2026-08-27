@@ -49,6 +49,25 @@
                 <TextBlock Text="{Binding FriendName}" Foreground="White" FontWeight="Bold" FontSize="12"/>
             </Border>
 
+            <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Top" Margin="8">
+                <StackPanel.Style>
+                    <Style TargetType="StackPanel">
+                        <Setter Property="Opacity" Value="0"/>
+                        <Style.Triggers>
+                            <DataTrigger Binding="{Binding IsMouseOver, RelativeSource={RelativeSource AncestorType=UserControl}}" Value="True">
+                                <Setter Property="Opacity" Value="1"/>
+                            </DataTrigger>
+                        </Style.Triggers>
+                    </Style>
+                </StackPanel.Style>
+                <Button Content="{Binding MuteIcon}" Style="{StaticResource TabIconButton}" Margin="0,0,6,0"
+                        Click="BtnMute_Click" ToolTip="Mudo"/>
+                <Slider Width="60" Minimum="0" Maximum="200" Value="{Binding Volume, Mode=TwoWay}"
+                        VerticalAlignment="Center" Margin="0,0,6,0" ToolTip="Volume"/>
+                <Button Content="&#xE711;" Style="{StaticResource TabIconButton}" Background="#CC2929"
+                        Click="BtnClose_Click" ToolTip="Sair desta live"/>
+            </StackPanel>
+
             <TextBlock Text="{Binding StatusText}" Foreground="#CCCCCC" FontSize="13" FontWeight="Bold"
                        HorizontalAlignment="Center" VerticalAlignment="Center" TextWrapping="Wrap"
                        MaxWidth="260" TextAlignment="Center"/>
@@ -57,15 +76,6 @@
                     VerticalAlignment="Bottom" Margin="8">
                 <TextBlock Text="{Binding StatsText}" Foreground="White" FontSize="10" FontFamily="Consolas"/>
             </Border>
-
-            <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Bottom" Margin="8">
-                <Button Content="{Binding MuteIcon}" Style="{StaticResource TabIconButton}" Margin="0,0,6,0"
-                        Click="BtnMute_Click" ToolTip="Mudo"/>
-                <Slider Width="60" Minimum="0" Maximum="200" Value="{Binding Volume, Mode=TwoWay}"
-                        VerticalAlignment="Center" Margin="0,0,6,0" ToolTip="Volume"/>
-                <Button Content="&#xE711;" Style="{StaticResource TabIconButton}" Background="#CC2929"
-                        Click="BtnClose_Click" ToolTip="Sair desta live"/>
-            </StackPanel>
         </Grid>
     </Border>
 </UserControl>

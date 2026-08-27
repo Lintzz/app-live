@@ -81,7 +81,32 @@ namespace RadminStreamApp
             }
         }
 
-        public void Start(string ipAddress = "0.0.0.0", int port = 8080)
+        /// <summary>
+        /// Sobe o servidor de sinalização. Retorna false quando a porta já está em uso
+        /// (outra instância do app aberta) — sem isso a falha passava despercebida e
+        /// ninguém conseguia se conectar.
+        /// </summary>
+        public bool Start(string ipAddress = "0.0.0.0", int port = 8080)
+        {
+            try
+            {
+                StartInternal(ipAddress, port);
+                IsRunning = true;
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine($"[Server] Falha ao iniciar em {ipAddress}:{port} - {ex.Message}");
+                IsRunning = false;
+                try { _server?.Dispose(); } catch { }
+                _server = null;
+                return false;
+            }
+        }
+
+        public bool IsRunning { get; private set; }
+
+        private void StartInternal(string ipAddress, int port)
         {
             _server = new WebSocketServer($"ws://{ipAddress}:{port}");
             _server.Start(socket =>

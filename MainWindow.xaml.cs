@@ -33,6 +33,10 @@ namespace RadminStreamApp
         private System.Windows.Threading.DispatcherTimer _mouseIdleTimer;
         private System.Windows.Threading.DispatcherTimer _statusTimer;
 
+        // Evita que sincronizar o estado visual dos toggles dispare os handlers de novo.
+        private bool _syncingToggles;
+        private bool _isBroadcasting;
+
         private int _gridColumns = 1;
         /// <summary>Colunas da grade de lives — 1 live ocupa tudo, 2 lado a lado, 3-4 em 2x2, 5+ em 3 colunas.</summary>
         public int GridColumns
@@ -47,7 +51,7 @@ namespace RadminStreamApp
             DataContext = this;
 
             _mouseIdleTimer = new System.Windows.Threading.DispatcherTimer();
-            _mouseIdleTimer.Interval = TimeSpan.FromSeconds(3);
+            _mouseIdleTimer.Interval = TimeSpan.FromSeconds(2.5);
             _mouseIdleTimer.Tick += MouseIdleTimer_Tick;
             this.MouseMove += MainWindow_MouseMove;
             this.Loaded += MainWindow_Loaded;
@@ -79,6 +83,44 @@ namespace RadminStreamApp
             }
 
             StartStatusTimer();
+            StartSignalingServer();
+            UpdateScreenOverlapWarning();
+
+            LocationChanged += (s2, e2) => UpdateScreenOverlapWarning();
+            SizeChanged += (s2, e2) => UpdateScreenOverlapWarning();
+
+            LoadScreens();
+        }
+
+        /// <summary>
+        /// O servidor sobe junto com o app (e não só ao transmitir): é ele que responde ao
+        /// STATUS_CHECK dos amigos, o que faz você aparecer como "online" na lista deles.
+        /// </summary>
+        private void StartSignalingServer()
+        {
+            _server = new SignalingServer();
+            _server.OnMessageReceived += Server_OnMessageReceived;
+            _server.OnClientConnected += (socket) => {
+                System.Windows.Application.Current.Dispatcher.Invoke(UpdateViewerCount);
+            };
+            _server.OnClientDisconnected += (socket) => {
+                _hostStreamManager?.RemoveClient(socket.ConnectionInfo.Id.ToString());
+                System.Windows.Application.Current.Dispatcher.Invoke(UpdateViewerCount);
+            };
+
+            if (!_server.Start("0.0.0.0", 8080))
+            {
+                BtnStartStream.IsEnabled = false;
+                BtnStartStream.ToolTip = "A porta 8080 já está em uso (outra instância do app aberta). " +
+                                         "Você pode assistir normalmente, mas não transmitir.";
+                System.Windows.MessageBox.Show(
+                    "Não foi possível abrir a porta 8080 — provavelmente há outra instância do app aberta.\n\n" +
+                    "Você ainda pode assistir às lives dos seus amigos, mas não vai conseguir transmitir por esta janela.",
+                    "Transmissão indisponível", MessageBoxButton.OK, MessageBoxImage.Warning);
+                return;
+            }
+
+            UpdateViewerCount();
         }
 
         // ───────────────────────────── Status dos amigos ─────────────────────────────
@@ -112,6 +154,7 @@ namespace RadminStreamApp
                 var connectTask = tcpClient.ConnectAsync(friend.Ip, 8080);
                 if (await System.Threading.Tasks.Task.WhenAny(connectTask, System.Threading.Tasks.Task.Delay(1000)) != connectTask)
                 {
+                    Observe(connectTask);
                     friend.IsOnline = false;
                     friend.IsStreaming = false;
                     return;
@@ -123,6 +166,7 @@ namespace RadminStreamApp
                 var wsConnectTask = ws.ConnectAsync(new Uri($"ws://{friend.Ip}:8080"), System.Threading.CancellationToken.None);
                 if (await System.Threading.Tasks.Task.WhenAny(wsConnectTask, System.Threading.Tasks.Task.Delay(1000)) != wsConnectTask)
                 {
+                    Observe(wsConnectTask);
                     friend.IsStreaming = false;
                     return;
                 }
@@ -133,7 +177,11 @@ namespace RadminStreamApp
 
                 var buffer = new byte[1024];
                 var receiveTask = ws.ReceiveAsync(new ArraySegment<byte>(buffer), System.Threading.CancellationToken.None);
-                if (await System.Threading.Tasks.Task.WhenAny(receiveTask, System.Threading.Tasks.Task.Delay(1000)) == receiveTask)
+                if (await System.Threading.Tasks.Task.WhenAny(receiveTask, System.Threading.Tasks.Task.Delay(1000)) != receiveTask)
+                {
+                    Observe(receiveTask);
+                }
+                else
                 {
                     var result = receiveTask.Result;
                     var responseText = System.Text.Encoding.UTF8.GetString(buffer, 0, result.Count);
@@ -153,6 +201,17 @@ namespace RadminStreamApp
             }
         }
 
+        /// <summary>
+        /// Marca como observada a task que perdeu a corrida para o timeout. Sem isso o socket
+        /// abortado no Dispose vira uma exceção não observada relançada pelo finalizador.
+        /// </summary>
+        private static void Observe(System.Threading.Tasks.Task task)
+        {
+            task.ContinueWith(t => { _ = t.Exception; },
+                System.Threading.Tasks.TaskContinuationOptions.OnlyOnFaulted |
+                System.Threading.Tasks.TaskContinuationOptions.ExecuteSynchronously);
+        }
+
         private void UpdateSidebarEmptyStates()
         {
             bool hasFriends = _friends != null && _friends.Count > 0;
@@ -160,50 +219,6 @@ namespace RadminStreamApp
 
             bool anyOnline = hasFriends && _friends.Any(f => f.IsOnline);
             SidebarNoneOnline.Visibility = (hasFriends && !anyOnline) ? Visibility.Visible : Visibility.Collapsed;
-        }
-
-        // ───────────────────────────── Modos ─────────────────────────────
-
-        private void BtnHost_Click(object sender, RoutedEventArgs e)
-        {
-            BtnHost.IsEnabled = false;
-            BtnViewer.IsEnabled = true;
-
-            PanelHost.Visibility = Visibility.Visible;
-            PanelViewer.Visibility = Visibility.Collapsed;
-            VideoBorder.Visibility = Visibility.Visible;
-            ViewerArea.Visibility = Visibility.Collapsed;
-
-            LoadScreens();
-
-            if (_server == null)
-            {
-                _server = new SignalingServer();
-                _server.OnMessageReceived += Server_OnMessageReceived;
-                _server.OnClientConnected += (socket) => {
-                    System.Windows.Application.Current.Dispatcher.Invoke(UpdateViewerCount);
-                };
-                _server.OnClientDisconnected += (socket) => {
-                    _hostStreamManager?.RemoveClient(socket.ConnectionInfo.Id.ToString());
-                    System.Windows.Application.Current.Dispatcher.Invoke(UpdateViewerCount);
-                };
-                _server.Start("0.0.0.0", 8080);
-                UpdateViewerCount();
-            }
-        }
-
-        private void BtnViewer_Click(object sender, RoutedEventArgs e)
-        {
-            BtnViewer.IsEnabled = false;
-            BtnHost.IsEnabled = true;
-
-            PanelHost.Visibility = Visibility.Collapsed;
-            PanelViewer.Visibility = Visibility.Visible;
-            VideoBorder.Visibility = Visibility.Collapsed;
-            ViewerArea.Visibility = Visibility.Visible;
-
-            UpdateSidebarEmptyStates();
-            UpdateViewerLayout();
         }
 
         // ───────────────────────────── Host ─────────────────────────────
@@ -240,11 +255,53 @@ namespace RadminStreamApp
 
         private void CboWindows_SelectionChanged(object sender, System.Windows.Controls.SelectionChangedEventArgs e)
         {
-            if (_hostStreamManager != null && BtnStopStream.IsEnabled && CboWindows.SelectedItem is CaptureSource selectedSource)
+            if (_hostStreamManager != null && _isBroadcasting && CboWindows.SelectedItem is CaptureSource selectedSource)
             {
                 _hostStreamManager.SetTargetSource(selectedSource);
                 _hostStreamManager.ForceKeyFrame();
                 _server?.BroadcastMessage("SOURCE_CHANGED");
+            }
+
+            UpdateScreenOverlapWarning();
+        }
+
+        private void BtnTogglePreview_Changed(object sender, RoutedEventArgs e)
+        {
+            HostPreviewCard.Visibility = BtnTogglePreview.IsChecked == true ? Visibility.Visible : Visibility.Collapsed;
+        }
+
+        private void BtnClosePreview_Click(object sender, RoutedEventArgs e)
+        {
+            BtnTogglePreview.IsChecked = false;
+        }
+
+        /// <summary>
+        /// Avisa quando a janela do app está no monitor que está sendo transmitido — nesse caso
+        /// as lives que você assiste aparecem dentro da sua própria transmissão.
+        /// </summary>
+        private void UpdateScreenOverlapWarning()
+        {
+            if (ScreenOverlapWarning == null) return;
+
+            if (!_isBroadcasting || !(CboWindows.SelectedItem is CaptureSource source))
+            {
+                ScreenOverlapWarning.Visibility = Visibility.Collapsed;
+                return;
+            }
+
+            try
+            {
+                var centerX = Left + Width / 2;
+                var centerY = Top + Height / 2;
+                var bounds = source.ScreenBounds;
+                bool onSameScreen = centerX >= bounds.Left && centerX <= bounds.Right
+                                 && centerY >= bounds.Top && centerY <= bounds.Bottom;
+
+                ScreenOverlapWarning.Visibility = onSameScreen ? Visibility.Visible : Visibility.Collapsed;
+            }
+            catch
+            {
+                ScreenOverlapWarning.Visibility = Visibility.Collapsed;
             }
         }
 
@@ -260,7 +317,7 @@ namespace RadminStreamApp
 
             var ips = _server.ConnectedClientIps;
             int count = ips.Count;
-            ViewerCountText.Text = $"{count} Viewer{(count != 1 ? "s" : "")}";
+            ViewerCountText.Text = count == 1 ? "1 assistindo" : $"{count} assistindo";
 
             if (count == 0)
             {
@@ -293,10 +350,16 @@ namespace RadminStreamApp
 
             _lastRoomPassword = passwordDialog.Password ?? string.Empty;
 
-            BtnStartStream.Content = "Streaming...";
-            BtnStartStream.IsEnabled = false;
-            BtnStopStream.IsEnabled = true;
-            BtnViewer.IsEnabled = false;
+            _isBroadcasting = true;
+            BtnStartStream.Visibility = Visibility.Collapsed;
+            BtnStopStream.Visibility = Visibility.Visible;
+            BtnTogglePreview.Visibility = Visibility.Visible;
+            ViewerCountPanel.Visibility = Visibility.Visible;
+            LiveBadge.Visibility = Visibility.Visible;
+            UpdateScreenOverlapWarning();
+
+            // As lives abertas silenciam: o som delas voltaria para os seus viewers pelo loopback.
+            ApplyBroadcastMuteToSessions(true);
 
             if (_hostStreamManager != null)
             {
@@ -330,13 +393,7 @@ namespace RadminStreamApp
             _hostStreamManager.OnLocalVideoFrameReady += (pixelData, width, height, stride) => {
                 UpdateHostBitmap(pixelData, width, height);
                 System.Windows.Application.Current.Dispatcher.InvokeAsync(() => {
-                    HostEmptyState.Visibility = Visibility.Collapsed;
-                });
-            };
-
-            _hostStreamManager.OnConnectionStateChanged += (state) => {
-                System.Windows.Application.Current.Dispatcher.InvokeAsync(() => {
-                    StatusText.Text = $"WebRTC: {state}";
+                    StatusText.Visibility = Visibility.Collapsed;
                 });
             };
 
@@ -371,15 +428,31 @@ namespace RadminStreamApp
                 _hostStreamManager = null;
             }
 
-            BtnStartStream.Content = "Start";
-            BtnStartStream.IsEnabled = true;
-            BtnStopStream.IsEnabled = false;
-            BtnViewer.IsEnabled = true;
+            _isBroadcasting = false;
+            BtnStartStream.Visibility = Visibility.Visible;
+            BtnStopStream.Visibility = Visibility.Collapsed;
+            BtnTogglePreview.Visibility = Visibility.Collapsed;
+            BtnTogglePreview.IsChecked = false;
+            ViewerCountPanel.Visibility = Visibility.Collapsed;
+            LiveBadge.Visibility = Visibility.Collapsed;
+            ScreenOverlapWarning.Visibility = Visibility.Collapsed;
+
+            // Devolve o som só das lives que o próprio app silenciou.
+            ApplyBroadcastMuteToSessions(false);
+
             VideoPlayer.Source = null;
             _hostBitmap = null;
-            StatusText.Text = "No Signal";
-            HostEmptyState.Visibility = Visibility.Visible;
+            StatusText.Text = "Sem sinal";
+            StatusText.Visibility = Visibility.Visible;
             StatsOverlay.Visibility = Visibility.Collapsed;
+        }
+
+        private void ApplyBroadcastMuteToSessions(bool broadcasting)
+        {
+            foreach (var session in _sessions.ToList())
+            {
+                session.ApplyBroadcastMute(broadcasting);
+            }
         }
 
         private void UpdateHostBitmap(byte[] pixelData, int width, int height)
@@ -424,6 +497,7 @@ namespace RadminStreamApp
 
             var session = new ViewerSession(friend);
             session.PasswordRequested += Session_PasswordRequested;
+            if (_isBroadcasting) session.ApplyBroadcastMute(true);
 
             _sessions.Add(session);
             SetActiveSession(session);
@@ -579,7 +653,7 @@ namespace RadminStreamApp
         private void ToggleTabsView_Changed(object sender, RoutedEventArgs e)
         {
             bool tabsMode = ToggleTabsView.IsChecked == true;
-            TxtLayoutMode.Text = tabsMode ? "Abas" : "Grade";
+            ToggleTabsView.ToolTip = tabsMode ? "Ver em grade" : "Ver em abas";
             TabSessions.Visibility = tabsMode ? Visibility.Visible : Visibility.Collapsed;
             GridSessions.Visibility = tabsMode ? Visibility.Collapsed : Visibility.Visible;
 
@@ -601,12 +675,18 @@ namespace RadminStreamApp
 
         // ───────────────────────────── Controles de vídeo ─────────────────────────────
 
-        private void BtnPip_Click(object sender, RoutedEventArgs e)
+        private void BtnPip_Changed(object sender, RoutedEventArgs e)
         {
-            if (_activeSession?.VideoBitmap == null) return;
+            if (_syncingToggles) return;
 
-            if (_activePip == null)
+            if (BtnPip.IsChecked == true)
             {
+                if (_activeSession?.VideoBitmap == null)
+                {
+                    SyncToggle(BtnPip, false);
+                    return;
+                }
+
                 _activePip = new PipWindow(_activeSession.VideoBitmap, v => _activeSession?.SetVolumeFromPip(v));
                 _activePip.OnRestoreRequested += () => {
                     System.Windows.Application.Current.Dispatcher.Invoke(() => {
@@ -615,41 +695,44 @@ namespace RadminStreamApp
                         _activePip?.Close();
                     });
                 };
-                _activePip.Closed += (s, ev) => { _activePip = null; };
+                _activePip.Closed += (s, ev) => {
+                    _activePip = null;
+                    SyncToggle(BtnPip, false);
+                };
                 _activePip.Show();
+                WindowState = WindowState.Minimized;
             }
-
-            WindowState = WindowState.Minimized;
-        }
-
-        private void BtnQuality_Click(object sender, RoutedEventArgs e)
-        {
-            if (BtnQuality.ContextMenu != null)
+            else
             {
-                BtnQuality.ContextMenu.PlacementTarget = BtnQuality;
-                BtnQuality.ContextMenu.Placement = System.Windows.Controls.Primitives.PlacementMode.Bottom;
-                BtnQuality.ContextMenu.IsOpen = true;
+                _activePip?.Close();
+                _activePip = null;
+                WindowState = WindowState.Normal;
+                Activate();
             }
         }
 
-        private void MenuItemQuality_Click(object sender, RoutedEventArgs e)
+        private void BtnFullscreen_Changed(object sender, RoutedEventArgs e)
         {
-            if (sender is System.Windows.Controls.MenuItem menuItem && menuItem.Tag is string quality)
-            {
-                _activeSession?.SetQuality(quality);
-            }
+            if (_syncingToggles) return;
+
+            if (BtnFullscreen.IsChecked == true) EnterFullscreen();
+            else ExitFullscreen();
         }
 
-        private void BtnFullscreen_Click(object sender, RoutedEventArgs e)
+        private void BtnTheater_Changed(object sender, RoutedEventArgs e)
         {
-            if (WindowStyle == WindowStyle.None) ExitFullscreen();
-            else EnterFullscreen();
+            if (_syncingToggles) return;
+
+            if (BtnTheater.IsChecked == true) EnterTheaterMode();
+            else ExitFullscreen();
         }
 
-        private void BtnTheater_Click(object sender, RoutedEventArgs e)
+        /// <summary>Ajusta o visual do toggle sem disparar o handler correspondente.</summary>
+        private void SyncToggle(System.Windows.Controls.Primitives.ToggleButton toggle, bool isChecked)
         {
-            if (WindowStyle == WindowStyle.None) ExitFullscreen();
-            else EnterTheaterMode();
+            _syncingToggles = true;
+            toggle.IsChecked = isChecked;
+            _syncingToggles = false;
         }
 
         private void VideoPlayer_MouseDown(object sender, System.Windows.Input.MouseButtonEventArgs e)
@@ -677,6 +760,8 @@ namespace RadminStreamApp
             TopPanel.Visibility = Visibility.Collapsed;
             OverlayGrid.Visibility = Visibility.Visible;
             ApplyImmersiveMargins(true);
+            SyncToggle(BtnFullscreen, true);
+            SyncToggle(BtnTheater, false);
         }
 
         private void EnterTheaterMode()
@@ -686,6 +771,8 @@ namespace RadminStreamApp
             TopPanel.Visibility = Visibility.Collapsed;
             OverlayGrid.Visibility = Visibility.Visible;
             ApplyImmersiveMargins(true);
+            SyncToggle(BtnTheater, true);
+            SyncToggle(BtnFullscreen, false);
         }
 
         private void ExitFullscreen()
@@ -707,13 +794,15 @@ namespace RadminStreamApp
             TopPanel.Visibility = Visibility.Visible;
             OverlayGrid.Visibility = Visibility.Collapsed;
             ApplyImmersiveMargins(false);
+            SyncToggle(BtnTheater, false);
+            SyncToggle(BtnFullscreen, false);
         }
 
         private void ApplyImmersiveMargins(bool immersive)
         {
-            VideoBorder.Margin = immersive ? new Thickness(0) : new Thickness(15, 0, 15, 15);
-            VideoBorder.CornerRadius = immersive ? new CornerRadius(0) : new CornerRadius(12);
             ViewerArea.Margin = immersive ? new Thickness(0) : new Thickness(15, 0, 15, 15);
+            VideoControlsBar.Margin = immersive ? new Thickness(0) : new Thickness(15, 0, 15, 15);
+            VideoControlsGradient.CornerRadius = immersive ? new CornerRadius(0) : new CornerRadius(0, 0, 12, 12);
         }
 
         // ───────────────────────────── Janela ─────────────────────────────
@@ -739,12 +828,42 @@ namespace RadminStreamApp
             Cursor = System.Windows.Input.Cursors.Arrow;
             _mouseIdleTimer.Stop();
             _mouseIdleTimer.Start();
+
+            if (ViewerArea.IsMouseOver || VideoControlsButtons.IsMouseOver)
+            {
+                ShowVideoControls();
+            }
         }
 
         private void MouseIdleTimer_Tick(object sender, EventArgs e)
         {
             _mouseIdleTimer.Stop();
+
+            // Enquanto o mouse estiver na própria barra ela não some.
+            if (VideoControlsButtons.IsMouseOver)
+            {
+                _mouseIdleTimer.Start();
+                return;
+            }
+
+            HideVideoControls();
             if (WindowStyle == WindowStyle.None) Cursor = System.Windows.Input.Cursors.None;
+        }
+
+        private void ShowVideoControls() => FadeVideoControls(1.0, true);
+
+        private void HideVideoControls() => FadeVideoControls(0.0, false);
+
+        private void FadeVideoControls(double target, bool interactive)
+        {
+            if (Math.Abs(VideoControlsBar.Opacity - target) < 0.01 && VideoControlsBar.IsHitTestVisible == interactive) return;
+
+            VideoControlsBar.IsHitTestVisible = interactive;
+            VideoControlsBar.BeginAnimation(OpacityProperty, new System.Windows.Media.Animation.DoubleAnimation
+            {
+                To = target,
+                Duration = TimeSpan.FromMilliseconds(160)
+            });
         }
 
         private void BtnUpdate_Click(object sender, RoutedEventArgs e)

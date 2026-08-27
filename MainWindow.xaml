@@ -176,24 +176,36 @@
             <Setter Property="BorderBrush" Value="#3D3D45"/>
             <Setter Property="Padding" Value="5"/>
         </Style>
-        <!-- Video Control Button Style -->
-        <Style x:Key="VideoControlButton" TargetType="Button">
+        <!-- Botões da barra de vídeo (estilo player: ícone limpo, indicador quando ativo) -->
+        <Style x:Key="VideoBarToggle" TargetType="ToggleButton">
             <Setter Property="Background" Value="Transparent"/>
-            <Setter Property="Foreground" Value="#66FFFFFF"/>
-            <Setter Property="BorderThickness" Value="0"/>
+            <Setter Property="Foreground" Value="#EDEDED"/>
+            <Setter Property="Width" Value="40"/>
+            <Setter Property="Height" Value="36"/>
+            <Setter Property="Margin" Value="2,0,2,0"/>
             <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="FontFamily" Value="Segoe MDL2 Assets"/>
+            <Setter Property="FontSize" Value="15"/>
             <Setter Property="Template">
                 <Setter.Value>
-                    <ControlTemplate TargetType="Button">
-                        <Border x:Name="border" Background="{TemplateBinding Background}" Padding="5">
+                    <ControlTemplate TargetType="ToggleButton">
+                        <Grid Background="Transparent">
+                            <Border x:Name="bg" Background="Transparent" CornerRadius="6"/>
                             <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
-                        </Border>
+                            <Border x:Name="activeDot" Height="3" Width="18" CornerRadius="2" Background="#0094F2"
+                                    VerticalAlignment="Bottom" HorizontalAlignment="Center" Margin="0,0,0,3" Visibility="Collapsed"/>
+                        </Grid>
                         <ControlTemplate.Triggers>
                             <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="bg" Property="Background" Value="#26FFFFFF"/>
                                 <Setter Property="Foreground" Value="White"/>
                             </Trigger>
+                            <Trigger Property="IsChecked" Value="True">
+                                <Setter TargetName="activeDot" Property="Visibility" Value="Visible"/>
+                                <Setter Property="Foreground" Value="#4FB3FF"/>
+                            </Trigger>
                             <Trigger Property="IsPressed" Value="True">
-                                <Setter Property="Foreground" Value="#AAAAAA"/>
+                                <Setter TargetName="bg" Property="Background" Value="#40FFFFFF"/>
                             </Trigger>
                         </ControlTemplate.Triggers>
                     </ControlTemplate>
@@ -247,17 +259,19 @@
             </Border.Effect>
             <WrapPanel Orientation="Horizontal" HorizontalAlignment="Center">
 
-                <StackPanel Orientation="Horizontal" Margin="0,3,20,3">
-                    <Button x:Name="BtnHost" Content="Transmitir" Style="{StaticResource ModernButton}" Margin="0,0,10,0" Click="BtnHost_Click"/>
-                    <Button x:Name="BtnViewer" Content="Assistir" Style="{StaticResource ModernButton}" Click="BtnViewer_Click"/>
-                </StackPanel>
+                <!-- Estado da sua transmissão: vive junto com as lives que você assiste -->
+                <StackPanel Orientation="Horizontal" Margin="0,3,0,3">
+                    <Border x:Name="LiveBadge" Background="#33E53935" BorderBrush="#E53935" BorderThickness="1"
+                            CornerRadius="4" Padding="8,3" Margin="0,0,12,0" VerticalAlignment="Center"
+                            Visibility="Collapsed">
+                        <StackPanel Orientation="Horizontal">
+                            <Ellipse Width="8" Height="8" Fill="#FF5252" VerticalAlignment="Center" Margin="0,0,6,0"/>
+                            <TextBlock Text="AO VIVO" Foreground="#FF8A80" FontWeight="Bold" FontSize="11" VerticalAlignment="Center"/>
+                        </StackPanel>
+                    </Border>
 
-                <Border Width="1" Background="#2D2D35" Margin="0,3,20,3" VerticalAlignment="Stretch"/>
-
-                <!-- Controles do Host -->
-                <StackPanel x:Name="PanelHost" Orientation="Horizontal" Visibility="Collapsed" Margin="0,3,0,3">
                     <TextBlock Text="Tela:" Foreground="#AAAAAA" VerticalAlignment="Center" Margin="0,0,8,0" FontWeight="SemiBold"/>
-                    <ComboBox x:Name="CboWindows" Width="150" Margin="0,0,10,0" DisplayMemberPath="Title"
+                    <ComboBox x:Name="CboWindows" Width="130" Margin="0,0,10,0" DisplayMemberPath="Title"
                               VerticalAlignment="Center" Height="30"
                               DropDownOpened="CboWindows_DropDownOpened" SelectionChanged="CboWindows_SelectionChanged">
                         <ComboBox.ItemContainerStyle>
@@ -267,21 +281,17 @@
                             </Style>
                         </ComboBox.ItemContainerStyle>
                     </ComboBox>
-                    <Button x:Name="BtnStartStream" Content="Start" Style="{StaticResource PrimaryButton}" Margin="0,0,10,0" Click="BtnStartStream_Click"/>
-                    <Button x:Name="BtnStopStream" Content="Stop" Style="{StaticResource DangerButton}" IsEnabled="False" Click="BtnStopStream_Click"/>
-                    <StackPanel x:Name="ViewerCountPanel" Orientation="Horizontal" VerticalAlignment="Center" Margin="12,0,0,0"
-                                Background="Transparent" ToolTipService.InitialShowDelay="200" ToolTipService.ShowDuration="30000">
-                        <TextBlock Text="&#xE77B;" FontFamily="Segoe MDL2 Assets" Foreground="#0094F2" FontSize="14" VerticalAlignment="Center" Margin="0,0,5,0"/>
-                        <TextBlock x:Name="ViewerCountText" Text="0 Viewers" Foreground="White" FontWeight="SemiBold" VerticalAlignment="Center"/>
-                    </StackPanel>
-                </StackPanel>
 
-                <!-- Controles do modo Assistir -->
-                <StackPanel x:Name="PanelViewer" Orientation="Horizontal" Visibility="Collapsed" Margin="0,3,0,3">
-                    <ToggleButton x:Name="ToggleTabsView" Width="96" Height="30" Margin="0,0,10,0" Cursor="Hand"
-                                  Background="#2D2D35" Foreground="#EEEEEE" BorderThickness="0"
-                                  Checked="ToggleTabsView_Changed" Unchecked="ToggleTabsView_Changed"
-                                  ToolTip="Alternar entre grade e abas">
+                    <Button x:Name="BtnStartStream" Content="Transmitir" Style="{StaticResource PrimaryButton}"
+                            Margin="0,0,10,0" Click="BtnStartStream_Click"/>
+                    <Button x:Name="BtnStopStream" Content="Parar" Style="{StaticResource DangerButton}"
+                            Visibility="Collapsed" Margin="0,0,10,0" Click="BtnStopStream_Click"/>
+
+                    <ToggleButton x:Name="BtnTogglePreview" Width="34" Height="30" Margin="0,0,10,0" Cursor="Hand"
+                                  Background="#2D2D35" Foreground="#EEEEEE" BorderThickness="0" Visibility="Collapsed"
+                                  Content="&#xE7B3;" FontFamily="Segoe MDL2 Assets" FontSize="14"
+                                  Checked="BtnTogglePreview_Changed" Unchecked="BtnTogglePreview_Changed"
+                                  ToolTip="Ver o que está sendo transmitido">
                         <ToggleButton.Template>
                             <ControlTemplate TargetType="ToggleButton">
                                 <Border x:Name="border" Background="{TemplateBinding Background}" CornerRadius="6">
@@ -291,56 +301,38 @@
                                     <Trigger Property="IsMouseOver" Value="True">
                                         <Setter TargetName="border" Property="Background" Value="#3D3D45"/>
                                     </Trigger>
+                                    <Trigger Property="IsChecked" Value="True">
+                                        <Setter TargetName="border" Property="Background" Value="#0094F2"/>
+                                    </Trigger>
                                 </ControlTemplate.Triggers>
                             </ControlTemplate>
                         </ToggleButton.Template>
-                        <TextBlock x:Name="TxtLayoutMode" Text="Grade" FontSize="12" FontWeight="SemiBold"/>
                     </ToggleButton>
 
-                    <Button x:Name="BtnQuality" Width="34" Height="30" Padding="0" Margin="0,0,6,0"
-                            Content="&#xE713;" FontFamily="Segoe MDL2 Assets" FontSize="14"
-                            Style="{StaticResource ModernButton}" Click="BtnQuality_Click" ToolTip="Qualidade do vídeo">
-                        <Button.ContextMenu>
-                            <ContextMenu Background="#1E1E24" Foreground="White" BorderBrush="#3D3D45">
-                                <MenuItem Header="1080p (Alta)" Click="MenuItemQuality_Click" Tag="1080p"/>
-                                <MenuItem Header="720p (Média)" Click="MenuItemQuality_Click" Tag="720p"/>
-                                <MenuItem Header="480p (Leve)" Click="MenuItemQuality_Click" Tag="480p"/>
-                            </ContextMenu>
-                        </Button.ContextMenu>
-                    </Button>
-                    <Button x:Name="BtnPip" Width="34" Height="30" Padding="0" Margin="0,0,6,0"
-                            Content="PiP" FontSize="11" FontWeight="Bold"
-                            Style="{StaticResource ModernButton}" Click="BtnPip_Click" ToolTip="Picture-in-Picture"/>
-                    <Button x:Name="BtnTheater" Width="34" Height="30" Padding="0" Margin="0,0,6,0"
-                            Content="&#xE7F4;" FontFamily="Segoe MDL2 Assets" FontSize="14"
-                            Style="{StaticResource ModernButton}" Click="BtnTheater_Click" ToolTip="Modo teatro"/>
-                    <Button x:Name="BtnFullscreen" Width="34" Height="30" Padding="0"
-                            Content="&#xE740;" FontFamily="Segoe MDL2 Assets" FontSize="14"
-                            Style="{StaticResource ModernButton}" Click="BtnFullscreen_Click" ToolTip="Tela cheia"/>
+                    <StackPanel x:Name="ViewerCountPanel" Orientation="Horizontal" VerticalAlignment="Center"
+                                Margin="0,0,10,0" Visibility="Collapsed"
+                                Background="Transparent" ToolTipService.InitialShowDelay="200" ToolTipService.ShowDuration="30000">
+                        <TextBlock Text="&#xE77B;" FontFamily="Segoe MDL2 Assets" Foreground="#0094F2" FontSize="14" VerticalAlignment="Center" Margin="0,0,5,0"/>
+                        <TextBlock x:Name="ViewerCountText" Text="0 assistindo" Foreground="White" FontWeight="SemiBold" VerticalAlignment="Center"/>
+                    </StackPanel>
+
+
                 </StackPanel>
+
+                <Border x:Name="ScreenOverlapWarning" Background="#33FFBB00" BorderBrush="#FFBB00" BorderThickness="1"
+                        CornerRadius="4" Padding="7,3" VerticalAlignment="Center" Visibility="Collapsed"
+                        ToolTip="As lives que você assiste aparecem na sua transmissão. Mova a janela para outra tela ou escolha outra tela para transmitir.">
+                    <StackPanel Orientation="Horizontal">
+                        <TextBlock Text="&#xE7BA;" FontFamily="Segoe MDL2 Assets" Foreground="#FFBB00" FontSize="12" VerticalAlignment="Center" Margin="0,0,5,0"/>
+                        <TextBlock Text="Esta janela está na tela transmitida" Foreground="#FFD54F" FontSize="11" VerticalAlignment="Center"/>
+                    </StackPanel>
+                    </Border>
+
             </WrapPanel>
         </Border>
 
-        <!-- Preview local do Host -->
-        <Border x:Name="VideoBorder" Grid.Row="3" Background="#050508" Margin="15,0,15,15" CornerRadius="12" ClipToBounds="True" BorderBrush="#2D2D35" BorderThickness="1">
-            <Border.Effect>
-                <DropShadowEffect Color="Black" BlurRadius="20" Opacity="0.6" ShadowDepth="5"/>
-            </Border.Effect>
-            <Grid>
-                <StackPanel x:Name="HostEmptyState" HorizontalAlignment="Center" VerticalAlignment="Center">
-                    <TextBlock x:Name="StatusText" Text="No Signal" Foreground="#222222" FontSize="24" FontWeight="Bold" HorizontalAlignment="Center"/>
-                    <TextBlock x:Name="StatusHint" Text="Escolha uma tela e clique em Start" Foreground="#3A3A42" FontSize="13" HorizontalAlignment="Center" Margin="0,8,0,0"/>
-                </StackPanel>
-                <Image x:Name="VideoPlayer" Stretch="Uniform" MouseDown="VideoPlayer_MouseDown"/>
-
-                <Border x:Name="StatsOverlay" Background="#99000000" CornerRadius="4" Padding="8,4" HorizontalAlignment="Left" VerticalAlignment="Bottom" Margin="10" Visibility="Collapsed" IsHitTestVisible="False">
-                    <TextBlock x:Name="StatsText" Text="" Foreground="White" FontSize="11" FontFamily="Consolas"/>
-                </Border>
-            </Grid>
-        </Border>
-
         <!-- Modo Assistir: sidebar de amigos + uma ou mais lives -->
-        <Grid x:Name="ViewerArea" Grid.Row="3" Margin="15,0,15,15" Visibility="Collapsed">
+        <Grid x:Name="ViewerArea" Grid.Row="3" Margin="15,0,15,15">
             <Grid.ColumnDefinitions>
                 <ColumnDefinition x:Name="SidebarColumn" Width="230"/>
                 <ColumnDefinition Width="*"/>
@@ -487,14 +479,95 @@
                 </Grid>
             </Border>
 
-            <!-- Faixa invisível que traz a sidebar de volta quando ela se esconde -->
-            <Border x:Name="SidebarHoverStrip" Grid.Column="0" Grid.ColumnSpan="2" Width="40" HorizontalAlignment="Left"
-                    Margin="-15,0,0,0" Background="Transparent" Visibility="Collapsed" Panel.ZIndex="9"
-                    MouseEnter="SidebarHoverStrip_MouseEnter">
-                <Border Width="4" Height="48" CornerRadius="2" Background="#332D2D35" HorizontalAlignment="Left"
-                        VerticalAlignment="Center" Margin="17,0,0,0" IsHitTestVisible="False"/>
+            <!-- Aba visível que revela a sidebar de amigos quando ela está escondida -->
+        <Border x:Name="SidebarHoverStrip" Grid.Column="0" Grid.ColumnSpan="2" HorizontalAlignment="Left"
+                VerticalAlignment="Center" Margin="-15,0,0,0" Background="Transparent" Padding="0,0,14,0"
+                Visibility="Collapsed" Panel.ZIndex="9"
+                MouseEnter="SidebarHoverStrip_MouseEnter" MouseLeftButtonUp="SidebarHoverStrip_MouseEnter"
+                Cursor="Hand" ToolTip="Mostrar amigos">
+            <Border Background="#E61E1E24" BorderBrush="#3D3D45" BorderThickness="0,1,1,1" CornerRadius="0,8,8,0"
+                    Padding="6,14,7,14">
+                <StackPanel>
+                    <TextBlock Text="&#xE77B;" FontFamily="Segoe MDL2 Assets" FontSize="14" Foreground="#0094F2"
+                               HorizontalAlignment="Center"/>
+                    <TextBlock Text="&#xE76C;" FontFamily="Segoe MDL2 Assets" FontSize="11" Foreground="#8A8A94"
+                               HorizontalAlignment="Center" Margin="0,4,0,0"/>
+                </StackPanel>
             </Border>
+        </Border>
         </Grid>
+
+
+        <!-- Controles do player: somem sozinhos e voltam quando o mouse passa -->
+        <Grid x:Name="VideoControlsBar" Grid.Row="3" VerticalAlignment="Bottom" Margin="15,0,15,15"
+              Panel.ZIndex="20" Opacity="0" IsHitTestVisible="False">
+            <!-- Só os botões capturam o mouse; o gradiente é decorativo. -->
+            <Border x:Name="VideoControlsGradient" CornerRadius="0,0,12,12" IsHitTestVisible="False" Height="70"
+                    VerticalAlignment="Bottom">
+                <Border.Background>
+                    <LinearGradientBrush StartPoint="0,0" EndPoint="0,1">
+                        <GradientStop Color="#00000000" Offset="0.0"/>
+                        <GradientStop Color="#B3000000" Offset="0.6"/>
+                        <GradientStop Color="#E6000000" Offset="1.0"/>
+                    </LinearGradientBrush>
+                </Border.Background>
+            </Border>
+            <StackPanel x:Name="VideoControlsButtons" Orientation="Horizontal" HorizontalAlignment="Right"
+                        VerticalAlignment="Bottom" Margin="12,0,10,6">
+                <ToggleButton x:Name="ToggleTabsView" Style="{StaticResource VideoBarToggle}"
+                              Content="&#xE80A;" Checked="ToggleTabsView_Changed" Unchecked="ToggleTabsView_Changed"
+                              ToolTip="Ver em abas"/>
+                <ToggleButton x:Name="BtnPip" Style="{StaticResource VideoBarToggle}"
+                              Content="&#xEE49;" Checked="BtnPip_Changed" Unchecked="BtnPip_Changed"
+                              ToolTip="Picture-in-Picture"/>
+                <ToggleButton x:Name="BtnTheater" Style="{StaticResource VideoBarToggle}"
+                              Content="&#xE7F4;" Checked="BtnTheater_Changed" Unchecked="BtnTheater_Changed"
+                              ToolTip="Modo teatro"/>
+                <ToggleButton x:Name="BtnFullscreen" Style="{StaticResource VideoBarToggle}"
+                              Content="&#xE740;" Checked="BtnFullscreen_Changed" Unchecked="BtnFullscreen_Changed"
+                              ToolTip="Tela cheia"/>
+            </StackPanel>
+        </Grid>
+
+
+        <!-- Preview do que você está transmitindo (opcional: você já vê a própria tela) -->
+        <Border x:Name="HostPreviewCard" Grid.Row="3" Width="240" Height="150" Margin="0,10,25,0"
+                HorizontalAlignment="Right" VerticalAlignment="Top" Panel.ZIndex="30"
+                Background="#050508" CornerRadius="8" ClipToBounds="True"
+                BorderBrush="#E53935" BorderThickness="1" Visibility="Collapsed">
+            <Border.Effect>
+                <DropShadowEffect Color="Black" BlurRadius="16" Opacity="0.7" ShadowDepth="3"/>
+            </Border.Effect>
+            <Grid>
+                <Image x:Name="VideoPlayer" Stretch="Uniform" MouseDown="VideoPlayer_MouseDown"/>
+                <TextBlock x:Name="StatusText" Text="Sem sinal" Foreground="#3A3A42" FontSize="12" FontWeight="Bold"
+                           HorizontalAlignment="Center" VerticalAlignment="Center"/>
+
+                <Border Background="#99000000" CornerRadius="3" Padding="5,2" HorizontalAlignment="Left"
+                        VerticalAlignment="Top" Margin="6">
+                    <TextBlock Text="Sua transmissão" Foreground="White" FontSize="10" FontWeight="SemiBold"/>
+                </Border>
+
+                <Border x:Name="StatsOverlay" Background="#99000000" CornerRadius="3" Padding="5,2"
+                        HorizontalAlignment="Left" VerticalAlignment="Bottom" Margin="6" Visibility="Collapsed"
+                        IsHitTestVisible="False">
+                    <TextBlock x:Name="StatsText" Text="" Foreground="White" FontSize="9" FontFamily="Consolas"/>
+                </Border>
+
+                <Button Content="&#xE10A;" FontFamily="Segoe MDL2 Assets" FontSize="10" Width="20" Height="20"
+                        HorizontalAlignment="Right" VerticalAlignment="Top" Margin="6"
+                        Background="#99000000" Foreground="White" BorderThickness="0" Cursor="Hand"
+                        Click="BtnClosePreview_Click" ToolTip="Fechar preview">
+                    <Button.Template>
+                        <ControlTemplate TargetType="Button">
+                            <Border Background="{TemplateBinding Background}" CornerRadius="3">
+                                <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                            </Border>
+                        </ControlTemplate>
+                    </Button.Template>
+                </Button>
+            </Grid>
+        </Border>
 
         <!-- Floating Overlay for Mouse Activity -->
         <Grid x:Name="OverlayGrid" Grid.RowSpan="4" Background="Transparent" Visibility="Collapsed" IsHitTestVisible="False">
@@ -566,7 +639,7 @@
                             <Grid Margin="10,20,10,10">
                                 <StackPanel VerticalAlignment="Center" HorizontalAlignment="Center">
                                     <TextBlock Text="Radmin Stream Live" Foreground="White" FontSize="16" FontWeight="Bold" HorizontalAlignment="Center"/>
-                                    <TextBlock Text="Versão 1.0.14" Foreground="#AAAAAA" FontSize="14" HorizontalAlignment="Center" Margin="0,5,0,20"/>
+                                    <TextBlock Text="Versão 1.0.15" Foreground="#AAAAAA" FontSize="14" HorizontalAlignment="Center" Margin="0,5,0,20"/>
                                     
                                     <TextBlock Foreground="#0094F2" FontSize="14" HorizontalAlignment="Center" Cursor="Hand" TextDecorations="Underline" MouseLeftButtonUp="GithubLink_Click">
                                         GitHub Repository

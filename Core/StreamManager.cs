@@ -384,14 +384,6 @@ namespace RadminStreamApp
                 return;
             }
 
-            if (msg.Type == "SET_QUALITY")
-            {
-                if (msg.Data == "1080p") SetResolution(1920, 1080);
-                else if (msg.Data == "720p") SetResolution(1280, 720);
-                else if (msg.Data == "480p") SetResolution(854, 480);
-                return;
-            }
-
             RTCPeerConnection pc;
             lock (_peerConnections)
             {

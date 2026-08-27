@@ -223,12 +223,6 @@ namespace RadminStreamApp
             _client?.SendMessage(SignalingMessage.Serialize(helloMsg));
         }
 
-        public void SetQuality(string quality)
-        {
-            var msg = new SignalingMessage { Type = "SET_QUALITY", Data = quality, SenderId = "client" };
-            _client?.SendMessage(SignalingMessage.Serialize(msg));
-        }
-
         private async Task SetupStreamManagerAsync()
         {
             if (_streamManager != null)
@@ -283,7 +277,37 @@ namespace RadminStreamApp
             _streamManager?.SetVolume(IsMuted ? 0f : (float)(_volume / 100.0));
         }
 
-        public void ToggleMute() => IsMuted = !IsMuted;
+        /// <summary>
+        /// True quando o mudo foi imposto pela transmissão, não pelo usuário. Só o mudo automático
+        /// é desfeito ao parar de transmitir — o que o usuário mutou na mão continua mudo.
+        /// </summary>
+        public bool MutedByBroadcast { get; private set; }
+
+        public void ToggleMute()
+        {
+            IsMuted = !IsMuted;
+            MutedByBroadcast = false;
+        }
+
+        /// <summary>
+        /// Silencia a live enquanto você está no ar: o som dela sairia pelos seus alto-falantes,
+        /// seria recapturado pelo loopback e voltaria para os seus viewers (e para o próprio amigo).
+        /// </summary>
+        public void ApplyBroadcastMute(bool broadcasting)
+        {
+            if (broadcasting)
+            {
+                if (IsMuted) return;
+                IsMuted = true;
+                MutedByBroadcast = true;
+            }
+            else
+            {
+                if (!MutedByBroadcast) return;
+                IsMuted = false;
+                MutedByBroadcast = false;
+            }
+        }
 
         /// <summary>O PiP manda 0..2 (slider de 0 a 200%); aqui vira a mesma escala do Volume.</summary>
         public void SetVolumeFromPip(float value)
