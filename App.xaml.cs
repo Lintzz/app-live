@@ -43,9 +43,34 @@ public partial class App : System.Windows.Application
         e.Handled = true;
     }
 
+    /// <summary>
+    /// Fechar uma conexao cancela recepcoes pendentes: o socket lanca 995 (operacao abortada).
+    /// E esperado ao encerrar uma live e so polui o log.
+    /// </summary>
+    private static bool IsExpectedSocketAbort(Exception ex)
+    {
+        foreach (var inner in Flatten(ex))
+        {
+            if (inner is System.Net.Sockets.SocketException se && se.ErrorCode == 995) return true;
+        }
+        return false;
+    }
+
+    private static System.Collections.Generic.IEnumerable<Exception> Flatten(Exception ex)
+    {
+        if (ex is AggregateException agg)
+        {
+            foreach (var inner in agg.Flatten().InnerExceptions) yield return inner;
+            yield break;
+        }
+
+        while (ex != null) { yield return ex; ex = ex.InnerException; }
+    }
+
     private static void Log(string origin, Exception ex)
     {
         if (ex == null) return;
+        if (IsExpectedSocketAbort(ex)) return;
 
         try
         {

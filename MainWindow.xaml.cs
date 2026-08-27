@@ -24,7 +24,24 @@ namespace RadminStreamApp
         private ObservableCollection<Friend> _friends;
         private ICollectionView _friendsView;
         private readonly ObservableCollection<ViewerSession> _sessions = new ObservableCollection<ViewerSession>();
+        private ICollectionView _gridView;
+        private ViewerSession _focusedSession;
+
         private ViewerSession _activeSession;
+        /// <summary>Live em foco: recebe o volume da barra, o PiP e o destaque na borda.</summary>
+        public ViewerSession ActiveSession
+        {
+            get => _activeSession;
+            private set { if (_activeSession != value) { _activeSession = value; OnPropertyChanged(); } }
+        }
+
+        private bool _showStats;
+        /// <summary>Liga o contador de fps/latência sobre cada live.</summary>
+        public bool ShowStats
+        {
+            get => _showStats;
+            private set { if (_showStats != value) { _showStats = value; OnPropertyChanged(); } }
+        }
 
         private PipWindow _activePip;
         private string _lastRoomPassword = string.Empty;
@@ -68,7 +85,10 @@ namespace RadminStreamApp
             _friendsView.SortDescriptions.Add(new SortDescription(nameof(Friend.Name), ListSortDirection.Ascending));
 
             LstFriendsSidebar.ItemsSource = _friendsView;
-            GridSessions.ItemsSource = _sessions;
+
+            // View própria: filtrar o foco aqui não afeta a lista de abas.
+            _gridView = new CollectionViewSource { Source = _sessions }.View;
+            GridSessions.ItemsSource = _gridView;
             TabSessions.ItemsSource = _sessions;
 
             _friends.CollectionChanged += (s, ev) => UpdateSidebarEmptyStates();
@@ -537,7 +557,7 @@ namespace RadminStreamApp
             session.Disconnect();
             _sessions.Remove(session);
 
-            if (_activeSession == session)
+            if (ActiveSession == session)
             {
                 SetActiveSession(_sessions.FirstOrDefault());
             }
@@ -551,30 +571,58 @@ namespace RadminStreamApp
 
         private void SetActiveSession(ViewerSession session)
         {
-            if (_activeSession == session) return;
-
-            if (_activeSession != null)
+            if (ActiveSession == session)
             {
-                _activeSession.IsActive = false;
-                _activeSession.PropertyChanged -= ActiveSession_PropertyChanged;
+                UpdatePlayerControlsState();
+                return;
             }
 
-            _activeSession = session;
-
-            if (_activeSession != null)
+            if (ActiveSession != null)
             {
-                _activeSession.IsActive = true;
-                _activeSession.PropertyChanged += ActiveSession_PropertyChanged;
-                _activePip?.SetBitmap(_activeSession.VideoBitmap);
+                ActiveSession.IsActive = false;
+                ActiveSession.PropertyChanged -= ActiveSession_PropertyChanged;
             }
+
+            ActiveSession = session;
+
+            if (ActiveSession != null)
+            {
+                ActiveSession.IsActive = true;
+                ActiveSession.PropertyChanged += ActiveSession_PropertyChanged;
+                _activePip?.SetBitmap(ActiveSession.VideoBitmap);
+            }
+
+            UpdatePlayerControlsState();
+        }
+
+        /// <summary>Mantém volume, mudo e foco da barra apontando para a live ativa.</summary>
+        private void UpdatePlayerControlsState()
+        {
+            bool hasSession = ActiveSession != null;
+            bool tabsMode = ToggleTabsView.IsChecked == true;
+            VolumeControls.Visibility = hasSession ? Visibility.Visible : Visibility.Collapsed;
+
+            // Em abas já se vê uma live por vez; focar ali não significa nada.
+            ToggleFocus.Visibility = (hasSession && !tabsMode) ? Visibility.Visible : Visibility.Collapsed;
+
+            _syncingToggles = true;
+            BtnMute.IsChecked = hasSession && ActiveSession.IsMuted;
+            ToggleFocus.IsChecked = hasSession && _focusedSession == ActiveSession;
+            _syncingToggles = false;
         }
 
         private void ActiveSession_PropertyChanged(object sender, PropertyChangedEventArgs e)
         {
+            if (e.PropertyName == nameof(ViewerSession.IsMuted))
+            {
+                System.Windows.Application.Current.Dispatcher.InvokeAsync(UpdatePlayerControlsState);
+                return;
+            }
+
             if (e.PropertyName == nameof(ViewerSession.VideoBitmap) && _activePip != null)
             {
                 System.Windows.Application.Current.Dispatcher.InvokeAsync(() =>
-                    _activePip?.SetBitmap(_activeSession?.VideoBitmap));
+                    _activePip?.SetBitmap(ActiveSession?.VideoBitmap));
             }
         }
 
@@ -588,7 +636,14 @@ namespace RadminStreamApp
         {
             int count = _sessions.Count;
 
-            GridColumns = count <= 1 ? 1 : (count == 2 ? 2 : (count <= 4 ? 2 : 3));
+            if (_focusedSession != null && !_sessions.Contains(_focusedSession))
+            {
+                _focusedSession = null;
+                _gridView?.Refresh();
+            }
+
+            int visible = _focusedSession != null ? 1 : count;
+            GridColumns = visible <= 1 ? 1 : (visible == 2 ? 2 : (visible <= 4 ? 2 : 3));
             ViewerEmptyState.Visibility = count == 0 ? Visibility.Visible : Visibility.Collapsed;
 
             if (count == 0)
@@ -597,15 +652,16 @@ namespace RadminStreamApp
             }
 
             // Com uma live só a sidebar sai da frente e volta quando o mouse encosta na borda esquerda.
-            bool autoHideSidebar = count == 1;
-            if (autoHideSidebar)
+            // Com uma live só a sidebar sai da frente; a aba na borda esquerda a traz de volta.
+            bool collapsible = count >= 1;
+            if (collapsible)
             {
                 SidebarColumn.Width = new GridLength(0);
                 System.Windows.Controls.Grid.SetColumnSpan(SidebarPanel, 2);
                 SidebarPanel.HorizontalAlignment = System.Windows.HorizontalAlignment.Left;
                 SidebarPanel.Width = 230;
-                SidebarPanel.Visibility = Visibility.Collapsed;
-                SidebarHoverStrip.Visibility = Visibility.Visible;
+                SidebarHandle.Visibility = Visibility.Visible;
+                SetSidebarOpen(false);
             }
             else
             {
@@ -614,36 +670,73 @@ namespace RadminStreamApp
                 SidebarPanel.HorizontalAlignment = System.Windows.HorizontalAlignment.Stretch;
                 SidebarPanel.Width = double.NaN;
                 SidebarPanel.Visibility = Visibility.Visible;
-                SidebarHoverStrip.Visibility = Visibility.Collapsed;
+                SidebarHandle.Visibility = Visibility.Collapsed;
             }
         }
 
-        private void SidebarHoverStrip_MouseEnter(object sender, System.Windows.Input.MouseEventArgs e)
+        private void SidebarHandle_Click(object sender, System.Windows.Input.MouseButtonEventArgs e)
         {
-            if (SidebarHoverStrip.Visibility == Visibility.Visible)
-            {
-                SidebarPanel.Visibility = Visibility.Visible;
-            }
+            // Sem marcar como tratado, o clique sobe para a janela e vira DragMove.
+            e.Handled = true;
+            SetSidebarOpen(SidebarPanel.Visibility != Visibility.Visible);
         }
 
-        private void SidebarPanel_MouseLeave(object sender, System.Windows.Input.MouseEventArgs e)
+        private void SetSidebarOpen(bool open)
         {
-            if (SidebarHoverStrip.Visibility == Visibility.Visible)
-            {
-                SidebarPanel.Visibility = Visibility.Collapsed;
-            }
+            SidebarPanel.Visibility = open ? Visibility.Visible : Visibility.Collapsed;
+            SidebarHandle.Margin = open ? new Thickness(215, 0, 0, 0) : new Thickness(-15, 0, 0, 0);
+            SidebarHandleArrow.Text = open ? "\uE76B" : "\uE76C";
+            SidebarHandle.ToolTip = open ? "Esconder amigos" : "Mostrar amigos";
         }
 
         private void StreamTab_OnCloseRequested(ViewerSession session) => CloseSession(session);
 
-        private void StreamTab_OnActivated(ViewerSession session) => SetActiveSession(session);
-
-        private void StreamTab_OnFullscreenRequested(ViewerSession session)
+        private void StreamTab_OnFocusRequested(ViewerSession session)
         {
             SetActiveSession(session);
-            if (WindowStyle == WindowStyle.None) ExitFullscreen();
-            else EnterFullscreen();
+            SetFocusedSession(_focusedSession == session ? null : session);
         }
+
+        /// <summary>
+        /// Deixa só uma live na tela sem desconectar as outras — elas seguem recebendo vídeo
+        /// e voltam quando o foco é desligado.
+        /// </summary>
+        private void SetFocusedSession(ViewerSession session)
+        {
+            _focusedSession = session;
+
+            if (_gridView != null)
+            {
+                _gridView.Filter = _focusedSession == null
+                    ? (Predicate<object>)null
+                    : (o => ReferenceEquals(o, _focusedSession));
+                _gridView.Refresh();
+            }
+
+            UpdateViewerLayout();
+            UpdatePlayerControlsState();
+        }
+
+        private void ToggleFocus_Changed(object sender, RoutedEventArgs e)
+        {
+            if (_syncingToggles) return;
+            SetFocusedSession(ToggleFocus.IsChecked == true ? ActiveSession : null);
+        }
+
+        private void ToggleStats_Changed(object sender, RoutedEventArgs e)
+        {
+            ShowStats = ToggleStats.IsChecked == true;
+        }
+
+        private void BtnMute_Changed(object sender, RoutedEventArgs e)
+        {
+            if (_syncingToggles || ActiveSession == null) return;
+
+            bool wantMuted = BtnMute.IsChecked == true;
+            if (ActiveSession.IsMuted != wantMuted) ActiveSession.ToggleMute();
+        }
+
+        private void StreamTab_OnActivated(ViewerSession session) => SetActiveSession(session);
 
         private void TabSessions_SelectionChanged(object sender, System.Windows.Controls.SelectionChangedEventArgs e)
         {
@@ -657,10 +750,13 @@ namespace RadminStreamApp
             TabSessions.Visibility = tabsMode ? Visibility.Visible : Visibility.Collapsed;
             GridSessions.Visibility = tabsMode ? Visibility.Collapsed : Visibility.Visible;
 
-            if (tabsMode && _activeSession != null)
+            if (tabsMode)
             {
-                TabSessions.SelectedItem = _activeSession;
+                if (_focusedSession != null) SetFocusedSession(null);
+                if (ActiveSession != null) TabSessions.SelectedItem = ActiveSession;
             }
+
+            UpdatePlayerControlsState();
         }
 
         private void BtnManageFriends_Click(object sender, RoutedEventArgs e)
@@ -681,13 +777,13 @@ namespace RadminStreamApp
 
             if (BtnPip.IsChecked == true)
             {
-                if (_activeSession?.VideoBitmap == null)
+                if (ActiveSession?.VideoBitmap == null)
                 {
                     SyncToggle(BtnPip, false);
                     return;
                 }
 
-                _activePip = new PipWindow(_activeSession.VideoBitmap, v => _activeSession?.SetVolumeFromPip(v));
+                _activePip = new PipWindow(ActiveSession.VideoBitmap, v => ActiveSession?.SetVolumeFromPip(v));
                 _activePip.OnRestoreRequested += () => {
                     System.Windows.Application.Current.Dispatcher.Invoke(() => {
                         WindowState = WindowState.Normal;
@@ -914,6 +1010,7 @@ namespace RadminStreamApp
 
         private void GithubLink_Click(object sender, System.Windows.Input.MouseButtonEventArgs e)
         {
+            e.Handled = true;
             try
             {
                 Process.Start(new ProcessStartInfo

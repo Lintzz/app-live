@@ -7,7 +7,9 @@ namespace RadminStreamApp
     {
         public event Action<ViewerSession> OnCloseRequested = delegate {};
         public event Action<ViewerSession> OnActivated = delegate {};
-        public event Action<ViewerSession> OnFullscreenRequested = delegate {};
+
+        /// <summary>Duplo clique na live: alterna entre focar só nela e voltar para a grade.</summary>
+        public event Action<ViewerSession> OnFocusRequested = delegate {};
 
         public StreamTab()
         {
@@ -21,14 +23,7 @@ namespace RadminStreamApp
             if (Session == null) return;
 
             OnActivated?.Invoke(Session);
-            if (e.ClickCount == 2) OnFullscreenRequested?.Invoke(Session);
-        }
-
-        private void BtnMute_Click(object sender, RoutedEventArgs e)
-        {
-            if (Session == null) return;
-            OnActivated?.Invoke(Session);
-            Session.ToggleMute();
+            if (e.ClickCount == 2) OnFocusRequested?.Invoke(Session);
         }
 
         private void BtnClose_Click(object sender, RoutedEventArgs e)
