@@ -51,7 +51,9 @@ namespace RadminStreamApp
         // Mesmo com a tela parada, o quadro precisa ser reenviado de tempos em tempos: é o
         // que garante keyframe para quem acabou de entrar na live (o DXGI só entrega
         // quadro quando algo muda, e sem isso o viewer novo ficava no preto).
-        private static readonly TimeSpan IdleFrameInterval = TimeSpan.FromMilliseconds(500);
+        // 300ms e nao 500: com a tela parada, o keyframe pedido por quem acabou de entrar so
+        // sai no proximo quadro emitido, entao este intervalo e o piso da espera por imagem.
+        private static readonly TimeSpan IdleFrameInterval = TimeSpan.FromMilliseconds(300);
         private TimeSpan _lastEmit = TimeSpan.MinValue;
         private bool _hasRealFrame;   // já veio pelo menos um quadro de verdade da tela
 

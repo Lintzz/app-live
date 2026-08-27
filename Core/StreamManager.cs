@@ -32,6 +32,24 @@ namespace RadminStreamApp
         private readonly Stopwatch _keyFrameClock = Stopwatch.StartNew();
         private TimeSpan _lastKeyFrame = TimeSpan.Zero;
 
+        // Logo depois que alguem entra, o keyframe sai com frequencia bem maior. O IDR unico
+        // disparado no "connected" costuma se perder — o ICE reporta conexao antes de a midia
+        // fluir de verdade — e sem isso o viewer ficava o ciclo inteiro sem imagem.
+        private static readonly TimeSpan KeyFrameBurstWindow = TimeSpan.FromSeconds(4);
+        private static readonly TimeSpan KeyFrameBurstInterval = TimeSpan.FromMilliseconds(400);
+        private TimeSpan _burstUntil = TimeSpan.MinValue;
+
+        // Piso entre keyframes atendidos sob demanda: com varios viewers pedindo ao mesmo
+        // tempo, sem isto o encoder mandaria so IDR e a banda explodiria.
+        private static readonly TimeSpan MinForcedKeyFrameGap = TimeSpan.FromMilliseconds(300);
+        private TimeSpan _lastForcedKeyFrame = TimeSpan.MinValue;
+
+        // Viewer: o video chega mas nada decodifica ate vir um keyframe. Se isso durar,
+        // pedimos um ao host em vez de esperar o proximo ciclo.
+        private volatile bool _videoArriving;
+        private volatile bool _videoDecodedEver;
+        private System.Threading.Timer? _keyFrameRequestTimer;
+
         // ───────────────────────────── Áudio (Opus/WebRTC) ─────────────────────────────
 
         // 20 ms a 48 kHz. O áudio agora viaja pela própria trilha WebRTC em Opus (~40 kbps)
@@ -139,7 +157,8 @@ namespace RadminStreamApp
                                 try
                                 {
                                     var now = _keyFrameClock.Elapsed;
-                                    if (now - _lastKeyFrame >= KeyFrameInterval)
+                                    var interval = now <= _burstUntil ? KeyFrameBurstInterval : KeyFrameInterval;
+                                    if (now - _lastKeyFrame >= interval)
                                     {
                                         _lastKeyFrame = now;
                                         _videoEncoder.ForceKeyFrame();
@@ -345,8 +364,33 @@ namespace RadminStreamApp
             }
         }
 
-        public void ForceKeyFrame()
+        public void ForceKeyFrame() => StartKeyFrameBurst();
+
+        /// <summary>Abre uma janela em que os keyframes saem com frequencia bem maior.</summary>
+        private void StartKeyFrameBurst()
         {
+            var now = _keyFrameClock.Elapsed;
+            _burstUntil = now + KeyFrameBurstWindow;
+
+            lock (_encoderLock)
+            {
+                try { _videoEncoder?.ForceKeyFrame(); } catch { }
+            }
+            _lastKeyFrame = now;
+            _lastForcedKeyFrame = now;
+        }
+
+        /// <summary>
+        /// Atende ao pedido de keyframe de um viewer, com um piso de tempo entre atendimentos
+        /// para que varios viewers pedindo junto nao virem uma enxurrada de IDR.
+        /// </summary>
+        private void ServeKeyFrameRequest()
+        {
+            var now = _keyFrameClock.Elapsed;
+            if (_lastForcedKeyFrame != TimeSpan.MinValue && now - _lastForcedKeyFrame < MinForcedKeyFrameGap) return;
+
+            _lastForcedKeyFrame = now;
+            _lastKeyFrame = now;
             lock (_encoderLock)
             {
                 try { _videoEncoder?.ForceKeyFrame(); } catch { }
@@ -396,6 +440,15 @@ namespace RadminStreamApp
             // Client creates a single connection (to the host)
             await CreatePeerConnection("host");
 
+            // Enquanto chegar video sem nada decodificar, insiste no pedido de keyframe.
+            _keyFrameRequestTimer = new System.Threading.Timer(_ =>
+            {
+                if (!_videoArriving || _videoDecodedEver) return;
+
+                var request = new SignalingMessage { Type = "REQUEST_KEYFRAME", SenderId = "client" };
+                OnLocalSdpReady?.Invoke("host", SignalingMessage.Serialize(request));
+            }, null, 600, 600);
+
             _viewerStatsTimer = new System.Threading.Timer(_ =>
             {
                 var fps = System.Threading.Interlocked.Exchange(ref _statsDecodedFrames, 0);
@@ -427,10 +480,11 @@ namespace RadminStreamApp
                 bool firstFrame = true;
                 pc.OnVideoFrameReceived += (IPEndPoint rep, uint timestamp, byte[] payload, VideoFormat format) =>
                 {
+                    _videoArriving = true;
                     if (firstFrame)
                     {
                         firstFrame = false;
-                        OnConnectionStateChanged?.Invoke("Decoding Video...");
+                        OnConnectionStateChanged?.Invoke("Aguardando keyframe...");
                     }
                     List<SIPSorceryMedia.Abstractions.VideoSample>? samples = null;
                     lock (_encoderLock)
@@ -452,6 +506,7 @@ namespace RadminStreamApp
                         var sample = samples.First();
                         if (sample.Sample != null)
                         {
+                            _videoDecodedEver = true;
                             System.Threading.Interlocked.Increment(ref _statsDecodedFrames);
                             OnVideoFrameDecoded?.Invoke(sample.Sample, (int)sample.Width, (int)sample.Height, (int)(sample.Width * 3));
                         }
@@ -476,10 +531,7 @@ namespace RadminStreamApp
                 OnConnectionStateChanged?.Invoke(state.ToString());
                 if (state == RTCPeerConnectionState.connected && _isHost)
                 {
-                    lock (_encoderLock)
-                    {
-                        try { _videoEncoder?.ForceKeyFrame(); } catch { }
-                    }
+                    StartKeyFrameBurst();
                 }
             };
 
@@ -506,6 +558,14 @@ namespace RadminStreamApp
 
             if (msg.Type == "STREAM_STOPPED")
             {
+                return;
+            }
+
+            // Equivalente ao PLI do WebRTC: o viewer avisa que esta sem imagem e o host manda
+            // um keyframe na hora, em vez de o viewer esperar o proximo ciclo.
+            if (msg.Type == "REQUEST_KEYFRAME")
+            {
+                if (_isHost) ServeKeyFrameRequest();
                 return;
             }
 
@@ -599,6 +659,8 @@ namespace RadminStreamApp
             _hostStatsTimer = null;
             _viewerStatsTimer?.Dispose();
             _viewerStatsTimer = null;
+            _keyFrameRequestTimer?.Dispose();
+            _keyFrameRequestTimer = null;
 
             _videoCapturer?.CloseVideo();
             _audioCapturer?.CloseAudio();
