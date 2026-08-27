@@ -15,26 +15,38 @@ Sempre que acionar esta skill, o agente deve executar as seguintes etapas rigoro
    - Execute o comando `gh release list --limit 1` para obter a última versão (ex: `v1.0.4`).
    - Calcule a **nova versão** incrementando o patch (ex: `1.0.4` -> `1.0.5`), a menos que o usuário solicite um incremento maior (minor ou major). Guarde o número da versão sem o `v` para os arquivos e com o `v` para o git/gh.
 
-2. **Atualizar Versões nos Arquivos**:
+2. **Atualizar a Versão** (um único lugar):
    - No arquivo `RadminStreamApp.csproj`, procure pela tag `<Version>` e atualize para a nova versão (ex: `<Version>1.0.5</Version>`).
-   - No arquivo `setup.iss`, procure por `AppVersion=` e atualize para a nova versão (ex: `AppVersion=1.0.5`).
-   - No arquivo `MainWindow.xaml`, na seção de informações/configurações, procure pelo texto da versão e atualize para a nova versão (ex: `Text="Versão 1.0.5"`).
+   - **Não edite mais `setup.iss` nem `MainWindow.xaml`**: o `AppVersion` do Inno sai do `version.iss`
+     gerado pelo build, e o texto na tela vem de `AppInfo.Version` (lido do assembly).
 
-3. **Gerar o Instalador**:
+3. **Rodar os Testes**:
+   - Execute `.\.dotnet\dotnet.exe test tests\RadminStreamApp.Tests\RadminStreamApp.Tests.csproj`.
+   - Se algum teste falhar, interrompa o processo e avise o usuário.
+
+4. **Gerar o Instalador**:
    - Leia as instruções da skill `build-installer` se precisar, ou apenas rode os comandos de build do instalador.
    - Certifique-se de executar o comando que compila o projeto e constrói o `RadminStream_Setup.exe` via Inno Setup (o comando está definido no `build-installer`).
 
-4. **Committar as Alterações (Opcional, mas recomendado)**:
-   - Verifique se os arquivos `RadminStreamApp.csproj`, `setup.iss` e `MainWindow.xaml` foram modificados (`git status`).
-   - Adicione os arquivos: `git add RadminStreamApp.csproj setup.iss MainWindow.xaml`
+5. **Gerar o Arquivo de Verificação** (obrigatório):
+   - O app se recusa a instalar uma atualização sem conferir o hash, então a release
+     precisa publicar um `.sha256` junto do instalador:
+     ```powershell
+     (Get-FileHash RadminStream_Setup.exe -Algorithm SHA256).Hash.ToLower() + "  RadminStream_Setup.exe" | Set-Content RadminStream_Setup.exe.sha256
+     ```
+
+6. **Committar as Alterações (Opcional, mas recomendado)**:
+   - Verifique o que mudou (`git status`).
+   - Adicione o arquivo: `git add RadminStreamApp.csproj`
    - Faça o commit: `git commit -m "Bump version to v{NOVA_VERSAO}"`
    - Faça o push: `git push`
 
-5. **Criar a Release no GitHub**:
-   - Execute o comando para criar a release e fazer o upload do executável recém gerado:
+7. **Criar a Release no GitHub**:
+   - Suba o instalador **e** o arquivo de verificação:
      ```powershell
-     gh release create v{NOVA_VERSAO} RadminStream_Setup.exe --title "v{NOVA_VERSAO}" --notes "Release automatizada v{NOVA_VERSAO}"
+     gh release create v{NOVA_VERSAO} RadminStream_Setup.exe RadminStream_Setup.exe.sha256 --title "v{NOVA_VERSAO}" --notes "Release automatizada v{NOVA_VERSAO}"
      ```
+   - Sem o `.sha256`, quem atualizar verá um aviso de "atualização não verificada".
 
 ## Tratamento de Erros
 - Caso a compilação ou geração do `RadminStream_Setup.exe` falhe, interrompa o processo e avise o usuário antes de commitar ou tentar criar a release.

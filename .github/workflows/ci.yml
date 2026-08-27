@@ -1,0 +1,30 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          lfs: true
+
+      - name: Configurar .NET 8
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Restaurar dependências
+        run: dotnet restore RadminStreamApp.csproj tests/RadminStreamApp.Tests/RadminStreamApp.Tests.csproj
+
+      - name: Compilar (Release)
+        run: dotnet build RadminStreamApp.csproj -c Release --no-restore
+
+      - name: Rodar testes
+        run: dotnet test tests/RadminStreamApp.Tests/RadminStreamApp.Tests.csproj -c Release --no-restore --verbosity normal

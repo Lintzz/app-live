@@ -17,19 +17,19 @@ namespace RadminStreamApp
 {
     public partial class MainWindow : Window, INotifyPropertyChanged
     {
-        private SignalingServer _server;
-        private StreamManager _hostStreamManager;
-        private WriteableBitmap _hostBitmap;
+        private SignalingServer? _server;
+        private HostBroadcast? _hostBroadcast;
+        private WriteableBitmap? _hostBitmap;
 
-        private ObservableCollection<Friend> _friends;
-        private ICollectionView _friendsView;
+        private ObservableCollection<Friend>? _friends;
+        private ICollectionView? _friendsView;
         private readonly ObservableCollection<ViewerSession> _sessions = new ObservableCollection<ViewerSession>();
-        private ICollectionView _gridView;
-        private ViewerSession _focusedSession;
+        private ICollectionView? _gridView;
+        private ViewerSession? _focusedSession;
 
-        private ViewerSession _activeSession;
+        private ViewerSession? _activeSession;
         /// <summary>Live em foco: recebe o volume da barra, o PiP e o destaque na borda.</summary>
-        public ViewerSession ActiveSession
+        public ViewerSession? ActiveSession
         {
             get => _activeSession;
             private set { if (_activeSession != value) { _activeSession = value; OnPropertyChanged(); } }
@@ -51,12 +51,13 @@ namespace RadminStreamApp
             private set { if (_showStats != value) { _showStats = value; OnPropertyChanged(); } }
         }
 
-        private PipWindow _activePip;
+        private PipWindow? _activePip;
         private string _lastRoomPassword = string.Empty;
-        private string _downloadUrl;
+        private string? _downloadUrl;
+        private string? _downloadChecksumUrl;
 
-        private System.Windows.Threading.DispatcherTimer _mouseIdleTimer;
-        private System.Windows.Threading.DispatcherTimer _statusTimer;
+        private readonly System.Windows.Threading.DispatcherTimer _mouseIdleTimer;
+        private System.Windows.Threading.DispatcherTimer? _statusTimer;
 
         // Evita que sincronizar o estado visual dos toggles dispare os handlers de novo.
         private bool _syncingToggles;
@@ -86,6 +87,11 @@ namespace RadminStreamApp
 
         private async void MainWindow_Loaded(object sender, RoutedEventArgs e)
         {
+            FriendsService.OnPersistenceError += (message) =>
+                System.Windows.Application.Current.Dispatcher.InvokeAsync(() =>
+                    System.Windows.MessageBox.Show(message, "Lista de amigos",
+                        MessageBoxButton.OK, MessageBoxImage.Warning));
+
             _friends = new ObservableCollection<Friend>(FriendsService.LoadFriends());
 
             _friendsView = CollectionViewSource.GetDefaultView(_friends);
@@ -99,13 +105,17 @@ namespace RadminStreamApp
             GridSessions.ItemsSource = _gridView;
             TabSessions.ItemsSource = _sessions;
 
-            _friends.CollectionChanged += (s, ev) => UpdateSidebarEmptyStates();
+            _friends.CollectionChanged += (s, ev) => { UpdateSidebarEmptyStates(); SyncAllowedIps(); };
             UpdateSidebarEmptyStates();
+
+            VersionText.Text = "Versão " + AppInfo.Version;
+            LoadAudioExclusionOptions();
 
             var updateResult = await UpdateManager.CheckForUpdatesAsync();
             if (updateResult.HasUpdate)
             {
                 _downloadUrl = updateResult.DownloadUrl;
+                _downloadChecksumUrl = updateResult.ChecksumUrl;
                 UpdateBannerText.Text = $"Uma nova versão ({updateResult.LatestVersion}) está disponível!";
                 UpdateBanner.Visibility = Visibility.Visible;
             }
@@ -130,12 +140,18 @@ namespace RadminStreamApp
         private void StartSignalingServer()
         {
             _server = new SignalingServer();
+            _server.RestrictToAllowedIps = ChkFriendsOnly?.IsChecked != false;
             _server.OnMessageReceived += Server_OnMessageReceived;
+            _server.OnConnectionRejected += (ip) =>
+            {
+                System.Windows.Application.Current.Dispatcher.InvokeAsync(() =>
+                    ShowTransientStatus($"Conexão recusada: {ip} não está na sua lista de amigos."));
+            };
             _server.OnClientConnected += (socket) => {
                 System.Windows.Application.Current.Dispatcher.Invoke(UpdateViewerCount);
             };
             _server.OnClientDisconnected += (socket) => {
-                _hostStreamManager?.RemoveClient(socket.ConnectionInfo.Id.ToString());
+                _hostBroadcast?.RemoveClient(socket.ConnectionInfo.Id.ToString());
                 System.Windows.Application.Current.Dispatcher.Invoke(UpdateViewerCount);
             };
 
@@ -151,7 +167,48 @@ namespace RadminStreamApp
                 return;
             }
 
+            _hostBroadcast = new HostBroadcast(_server);
+            _hostBroadcast.AudioCaptureError += (error) =>
+                System.Windows.Application.Current.Dispatcher.Invoke(() =>
+                    System.Windows.MessageBox.Show(error, "Aviso - Captura de Áudio",
+                        MessageBoxButton.OK, MessageBoxImage.Warning));
+
+            _hostBroadcast.FrameReady += (pixels, width, height) =>
+            {
+                UpdateHostBitmap(pixels, width, height);
+                System.Windows.Application.Current.Dispatcher.InvokeAsync(() =>
+                    StatusText.Visibility = Visibility.Collapsed);
+            };
+
+            _hostBroadcast.StatsUpdated += (fps, kbps) =>
+                System.Windows.Application.Current.Dispatcher.InvokeAsync(() =>
+                {
+                    StatsOverlay.Visibility = Visibility.Visible;
+                    StatsText.Text = $"📤 {fps}fps | {kbps:F1} kbps";
+                });
+
+            SyncAllowedIps();
             UpdateViewerCount();
+        }
+
+        /// <summary>Repassa a lista de amigos ao servidor: só esses IPs conseguem conectar.</summary>
+        private void SyncAllowedIps()
+        {
+            if (_server == null || _friends == null) return;
+            _server.SetAllowedIps(_friends.Select(f => f.Ip));
+        }
+
+        private void ChkFriendsOnly_Changed(object sender, RoutedEventArgs e)
+        {
+            if (_server == null || ChkFriendsOnly == null) return;
+            _server.RestrictToAllowedIps = ChkFriendsOnly.IsChecked == true;
+        }
+
+        /// <summary>Aviso curto na barra de status, sem roubar o foco com um MessageBox.</summary>
+        private void ShowTransientStatus(string message)
+        {
+            StatusText.Text = message;
+            StatusText.Visibility = Visibility.Visible;
         }
 
         // ───────────────────────────── Status dos amigos ─────────────────────────────
@@ -168,90 +225,20 @@ namespace RadminStreamApp
 
         private async System.Threading.Tasks.Task RefreshAllFriendsStatusAsync()
         {
-            foreach (var friend in _friends.ToList())
-            {
-                await CheckFriendStatusAsync(friend);
-            }
+            // Em paralelo: cada checagem custa até 4s, então em série uma lista de 8+ amigos
+            // estourava o intervalo de 30s do timer e os ciclos se atropelavam.
+            await System.Threading.Tasks.Task.WhenAll(
+                _friends!.ToList().Select(CheckFriendStatusAsync));
 
             _friendsView?.Refresh();
             UpdateSidebarEmptyStates();
         }
 
-        private async System.Threading.Tasks.Task CheckFriendStatusAsync(Friend friend)
+        private static async System.Threading.Tasks.Task CheckFriendStatusAsync(Friend friend)
         {
-            try
-            {
-                using var tcpClient = new System.Net.Sockets.TcpClient();
-                var connectTask = tcpClient.ConnectAsync(friend.Ip, 8080);
-                if (await System.Threading.Tasks.Task.WhenAny(connectTask, System.Threading.Tasks.Task.Delay(1000)) != connectTask)
-                {
-                    Observe(connectTask);
-                    friend.IsOnline = false;
-                    friend.IsStreaming = false;
-                    return;
-                }
-
-                friend.IsOnline = true;
-
-                using var ws = new System.Net.WebSockets.ClientWebSocket();
-                var wsConnectTask = ws.ConnectAsync(new Uri($"ws://{friend.Ip}:8080"), System.Threading.CancellationToken.None);
-                if (await System.Threading.Tasks.Task.WhenAny(wsConnectTask, System.Threading.Tasks.Task.Delay(1000)) != wsConnectTask)
-                {
-                    Observe(wsConnectTask);
-                    friend.IsStreaming = false;
-                    return;
-                }
-
-                var checkMsg = new SignalingMessage { Type = "STATUS_CHECK" };
-                var bytes = System.Text.Encoding.UTF8.GetBytes(SignalingMessage.Serialize(checkMsg));
-                await ws.SendAsync(new ArraySegment<byte>(bytes), System.Net.WebSockets.WebSocketMessageType.Text, true, System.Threading.CancellationToken.None);
-
-                // Um host transmitindo manda áudio no mesmo socket; a resposta pode não vir de
-                // primeira, então lemos até achar o STATUS_RESPONSE (ou estourar o tempo).
-                var deadline = DateTime.UtcNow.AddSeconds(2);
-                var buffer = new byte[8192];
-                while (DateTime.UtcNow < deadline)
-                {
-                    var receiveTask = ws.ReceiveAsync(new ArraySegment<byte>(buffer), System.Threading.CancellationToken.None);
-                    var remaining = deadline - DateTime.UtcNow;
-                    if (remaining <= TimeSpan.Zero) { Observe(receiveTask); break; }
-
-                    if (await System.Threading.Tasks.Task.WhenAny(receiveTask, System.Threading.Tasks.Task.Delay(remaining)) != receiveTask)
-                    {
-                        Observe(receiveTask);
-                        break;
-                    }
-
-                    var result = receiveTask.Result;
-                    if (result.MessageType != System.Net.WebSockets.WebSocketMessageType.Text) continue;
-
-                    var responseText = System.Text.Encoding.UTF8.GetString(buffer, 0, result.Count);
-                    var responseMsg = SignalingMessage.Deserialize(responseText);
-                    if (responseMsg != null && responseMsg.Type == "STATUS_RESPONSE")
-                    {
-                        friend.IsStreaming = (responseMsg.Data == "STREAMING");
-                        break;
-                    }
-                }
-
-                try { await ws.CloseAsync(System.Net.WebSockets.WebSocketCloseStatus.NormalClosure, "", System.Threading.CancellationToken.None); } catch { }
-            }
-            catch
-            {
-                friend.IsOnline = false;
-                friend.IsStreaming = false;
-            }
-        }
-
-        /// <summary>
-        /// Marca como observada a task que perdeu a corrida para o timeout. Sem isso o socket
-        /// abortado no Dispose vira uma exceção não observada relançada pelo finalizador.
-        /// </summary>
-        private static void Observe(System.Threading.Tasks.Task task)
-        {
-            task.ContinueWith(t => { _ = t.Exception; },
-                System.Threading.Tasks.TaskContinuationOptions.OnlyOnFaulted |
-                System.Threading.Tasks.TaskContinuationOptions.ExecuteSynchronously);
+            var status = await Services.FriendStatusService.CheckAsync(friend.Ip);
+            friend.IsOnline = status.IsOnline;
+            friend.IsStreaming = status.IsStreaming;
         }
 
         private void UpdateSidebarEmptyStates()
@@ -259,7 +246,7 @@ namespace RadminStreamApp
             bool hasFriends = _friends != null && _friends.Count > 0;
             SidebarEmptyState.Visibility = hasFriends ? Visibility.Collapsed : Visibility.Visible;
 
-            bool anyOnline = hasFriends && _friends.Any(f => f.IsOnline);
+            bool anyOnline = hasFriends && _friends!.Any(f => f.IsOnline);
             SidebarNoneOnline.Visibility = (hasFriends && !anyOnline) ? Visibility.Visible : Visibility.Collapsed;
         }
 
@@ -297,11 +284,9 @@ namespace RadminStreamApp
 
         private void CboWindows_SelectionChanged(object sender, System.Windows.Controls.SelectionChangedEventArgs e)
         {
-            if (_hostStreamManager != null && _isBroadcasting && CboWindows.SelectedItem is CaptureSource selectedSource)
+            if (_isBroadcasting && CboWindows.SelectedItem is CaptureSource selectedSource)
             {
-                _hostStreamManager.SetTargetSource(selectedSource);
-                _hostStreamManager.ForceKeyFrame();
-                _server?.BroadcastMessage("SOURCE_CHANGED");
+                _hostBroadcast?.ChangeSource(selectedSource);
             }
 
             UpdateScreenOverlapWarning();
@@ -349,8 +334,8 @@ namespace RadminStreamApp
 
         private async void Server_OnMessageReceived(Fleck.IWebSocketConnection socket, string message)
         {
-            if (_hostStreamManager != null)
-                await _hostStreamManager.HandleSignalingMessage(socket.ConnectionInfo.Id.ToString(), message);
+            if (_hostBroadcast != null)
+                await _hostBroadcast.HandleSignalingAsync(socket.ConnectionInfo.Id.ToString(), message);
         }
 
         private void UpdateViewerCount()
@@ -403,72 +388,21 @@ namespace RadminStreamApp
             // As lives abertas silenciam: o som delas voltaria para os seus viewers pelo loopback.
             ApplyBroadcastMuteToSessions(true);
 
-            if (_hostStreamManager != null)
+            if (_hostBroadcast == null) return;
+
+            await _hostBroadcast.StartAsync(new BroadcastSettings
             {
-                _hostStreamManager.Stop();
-            }
-
-            _hostStreamManager = new StreamManager();
-            _hostStreamManager.SetMaxPerformanceMode(ChkMaxPerformance?.IsChecked == true);
-
-            _hostStreamManager.OnAudioCaptureError += (error) => {
-                System.Windows.Application.Current.Dispatcher.Invoke(() => {
-                    System.Windows.MessageBox.Show(error, "Aviso - Captura de Áudio",
-                        MessageBoxButton.OK, MessageBoxImage.Warning);
-                });
-            };
-
-            _hostStreamManager.OnLocalSdpReady += (clientId, sdpJson) => {
-                _server?.SendToClient(clientId, sdpJson);
-            };
-
-            _hostStreamManager.OnBinaryDataReady += (data) => {
-                _server?.BroadcastBinary(data);
-            };
-
-            if (_server != null)
-            {
-                _server.RoomPassword = _lastRoomPassword;
-                _server.IsStreaming = true;
-            }
-
-            _hostStreamManager.OnLocalVideoFrameReady += (pixelData, width, height, stride) => {
-                UpdateHostBitmap(pixelData, width, height);
-                System.Windows.Application.Current.Dispatcher.InvokeAsync(() => {
-                    StatusText.Visibility = Visibility.Collapsed;
-                });
-            };
-
-            _hostStreamManager.OnHostStatsUpdated += (fps, kbps) => {
-                System.Windows.Application.Current.Dispatcher.InvokeAsync(() => {
-                    StatsOverlay.Visibility = Visibility.Visible;
-                    StatsText.Text = $"📤 {fps}fps | {kbps:F1} kbps";
-                });
-            };
-
-            await System.Threading.Tasks.Task.Run(() =>
-            {
-                _hostStreamManager.SetTargetSource(selectedSource);
-                _hostStreamManager.SetResolution(1920, 1080);
-                _hostStreamManager.InitializeHost();
+                Source = selectedSource,
+                RoomPassword = _lastRoomPassword,
+                MaxPerformance = ChkMaxPerformance?.IsChecked == true,
+                ForceGdiCapture = ChkForceGdiCapture?.IsChecked == true,
+                ExcludedAudioProcessId = ResolveExcludedAudioPid()
             });
-
-            _server?.BroadcastMessage("STREAM_STARTED");
         }
 
         private void BtnStopStream_Click(object sender, RoutedEventArgs e)
         {
-            if (_server != null)
-            {
-                _server.IsStreaming = false;
-                _server.BroadcastMessage("STREAM_STOPPED");
-                _server.RoomPassword = string.Empty;
-            }
-            if (_hostStreamManager != null)
-            {
-                try { _hostStreamManager.Stop(); } catch { }
-                _hostStreamManager = null;
-            }
+            _hostBroadcast?.Stop();
 
             _isBroadcasting = false;
             BtnStartStream.Visibility = Visibility.Visible;
@@ -531,9 +465,21 @@ namespace RadminStreamApp
                 return;
             }
 
-            // O status pode estar velho (checagem a cada 30s): tenta conectar mesmo assim
-            // em vez de ignorar o clique, e revalida em paralelo.
-            if (!friend.IsOnline) _ = CheckFriendStatusAsync(friend);
+            // Sem live no ar não há o que assistir. O card já fica inerte nesse estado; esta
+            // guarda cobre o caminho por código (e a corrida com a checagem de 30s).
+            if (!friend.IsOnline || !friend.IsStreaming)
+            {
+                await CheckFriendStatusAsync(friend);
+                _friendsView?.Refresh();
+
+                if (!friend.IsOnline || !friend.IsStreaming)
+                {
+                    ShowTransientStatus(friend.IsOnline
+                        ? $"{friend.DisplayName} está online, mas não está transmitindo."
+                        : $"{friend.DisplayName} está offline.");
+                    return;
+                }
+            }
 
             var session = new ViewerSession(friend);
             session.PasswordRequested += Session_PasswordRequested;
@@ -589,7 +535,7 @@ namespace RadminStreamApp
             }
         }
 
-        private void SetActiveSession(ViewerSession session)
+        private void SetActiveSession(ViewerSession? session)
         {
             if (ActiveSession == session)
             {
@@ -609,7 +555,7 @@ namespace RadminStreamApp
             {
                 ActiveSession.IsActive = true;
                 ActiveSession.PropertyChanged += ActiveSession_PropertyChanged;
-                _activePip?.SetBitmap(ActiveSession.VideoBitmap);
+                if (ActiveSession.VideoBitmap != null) _activePip?.SetBitmap(ActiveSession.VideoBitmap);
             }
 
             // Em abas o conteudo so aparece se a aba correspondente estiver selecionada.
@@ -632,12 +578,12 @@ namespace RadminStreamApp
             ToggleFocus.Visibility = (hasSession && !tabsMode) ? Visibility.Visible : Visibility.Collapsed;
 
             _syncingToggles = true;
-            BtnMute.IsChecked = hasSession && ActiveSession.IsMuted;
+            BtnMute.IsChecked = hasSession && ActiveSession!.IsMuted;
             ToggleFocus.IsChecked = hasSession && _focusedSession == ActiveSession;
             _syncingToggles = false;
         }
 
-        private void ActiveSession_PropertyChanged(object sender, PropertyChangedEventArgs e)
+        private void ActiveSession_PropertyChanged(object? sender, PropertyChangedEventArgs e)
         {
             if (e.PropertyName == nameof(ViewerSession.IsMuted))
             {
@@ -648,11 +594,14 @@ namespace RadminStreamApp
             if (e.PropertyName == nameof(ViewerSession.VideoBitmap) && _activePip != null)
             {
                 System.Windows.Application.Current.Dispatcher.InvokeAsync(() =>
-                    _activePip?.SetBitmap(ActiveSession?.VideoBitmap));
+                {
+                        var bitmap = ActiveSession?.VideoBitmap;
+                        if (bitmap != null) _activePip?.SetBitmap(bitmap);
+                    });
             }
         }
 
-        private void Sessions_CollectionChanged(object sender, NotifyCollectionChangedEventArgs e)
+        private void Sessions_CollectionChanged(object? sender, NotifyCollectionChangedEventArgs e)
         {
             UpdateViewerLayout();
             _friendsView?.Refresh();
@@ -726,14 +675,14 @@ namespace RadminStreamApp
         /// Deixa só uma live na tela sem desconectar as outras — elas seguem recebendo vídeo
         /// e voltam quando o foco é desligado.
         /// </summary>
-        private void SetFocusedSession(ViewerSession session)
+        private void SetFocusedSession(ViewerSession? session)
         {
             _focusedSession = session;
 
             if (_gridView != null)
             {
                 _gridView.Filter = _focusedSession == null
-                    ? (Predicate<object>)null
+                    ? (Predicate<object>?)null
                     : (o => ReferenceEquals(o, _focusedSession));
                 _gridView.Refresh();
             }
@@ -795,10 +744,13 @@ namespace RadminStreamApp
 
         private void BtnManageFriends_Click(object sender, RoutedEventArgs e)
         {
+            if (_friends == null) return;
+
             var dialog = new ManageFriendsDialog(_friends) { Owner = this };
             dialog.FriendAdded += (friend) => { _ = CheckFriendStatusAsync(friend); };
             dialog.ShowDialog();
 
+            SyncAllowedIps();
             _ = RefreshAllFriendsStatusAsync();
             UpdateSidebarEmptyStates();
         }
@@ -967,7 +919,7 @@ namespace RadminStreamApp
             }
         }
 
-        private void MouseIdleTimer_Tick(object sender, EventArgs e)
+        private void MouseIdleTimer_Tick(object? sender, EventArgs e)
         {
             _mouseIdleTimer.Stop();
 
@@ -1014,7 +966,7 @@ namespace RadminStreamApp
                 BtnUpdate.Content = "Baixando...";
                 BtnUpdate.IsEnabled = false;
                 BtnDismissUpdate.IsEnabled = false;
-                _ = UpdateManager.DownloadAndInstallUpdateAsync(_downloadUrl);
+                _ = UpdateManager.DownloadAndInstallUpdateAsync(_downloadUrl, _downloadChecksumUrl);
             }
         }
 
@@ -1050,7 +1002,60 @@ namespace RadminStreamApp
             }
             catch { }
 
-            _hostStreamManager?.SetMaxPerformanceMode(isMaxPerformance);
+            _hostBroadcast?.ApplyMaxPerformance(isMaxPerformance);
+        }
+
+        // ──────────────────── Exclusão de áudio por processo ────────────────────
+
+        private string _excludedAudioProcessName = string.Empty;
+
+        private void LoadAudioExclusionOptions()
+        {
+            var options = Services.AudioExclusionService.ListOptions(_excludedAudioProcessName);
+
+            CboAudioExclusion.ItemsSource = options;
+            CboAudioExclusion.SelectedItem = options.FirstOrDefault(o =>
+                string.Equals(o.Name, _excludedAudioProcessName, StringComparison.OrdinalIgnoreCase)) ?? options[0];
+
+            UpdateAudioExclusionWarning();
+        }
+
+        private void CboAudioExclusion_DropDownOpened(object sender, EventArgs e) => LoadAudioExclusionOptions();
+
+        private void CboAudioExclusion_SelectionChanged(object sender, System.Windows.Controls.SelectionChangedEventArgs e)
+        {
+            if (CboAudioExclusion.SelectedItem is not Services.AudioExclusionOption option) return;
+
+            _excludedAudioProcessName = option.Name;
+            UpdateAudioExclusionWarning();
+
+            // Vale já na transmissão em andamento.
+            _hostBroadcast?.ApplyExcludedAudioProcess(ResolveExcludedAudioPid());
+        }
+
+        private uint ResolveExcludedAudioPid()
+            => Services.AudioExclusionService.ResolvePid(_excludedAudioProcessName);
+
+        /// <summary>Avisa quando o programa escolhido não está aberto — nesse caso nada é excluído.</summary>
+        private void UpdateAudioExclusionWarning()
+        {
+            if (AudioExclusionWarning == null) return;
+
+            if (!string.IsNullOrEmpty(_excludedAudioProcessName) && ResolveExcludedAudioPid() == 0)
+            {
+                AudioExclusionWarning.Text =
+                    $"\"{_excludedAudioProcessName}\" não está em execução — enquanto isso, todo o áudio do sistema será transmitido.";
+                AudioExclusionWarning.Visibility = Visibility.Visible;
+            }
+            else
+            {
+                AudioExclusionWarning.Visibility = Visibility.Collapsed;
+            }
+        }
+
+        private void ChkForceGdiCapture_Changed(object sender, RoutedEventArgs e)
+        {
+            _hostBroadcast?.ApplyForceGdiCapture(ChkForceGdiCapture?.IsChecked == true);
         }
 
         private void GithubLink_Click(object sender, System.Windows.Input.MouseButtonEventArgs e)
@@ -1060,7 +1065,7 @@ namespace RadminStreamApp
             {
                 Process.Start(new ProcessStartInfo
                 {
-                    FileName = "https://github.com",
+                    FileName = AppInfo.RepositoryUrl,
                     UseShellExecute = true
                 });
             }
@@ -1070,7 +1075,7 @@ namespace RadminStreamApp
         protected override void OnClosed(EventArgs e)
         {
             _server?.Stop();
-            _hostStreamManager?.Stop();
+            _hostBroadcast?.Dispose();
             foreach (var session in _sessions.ToList())
             {
                 session.Dispose();
@@ -1079,8 +1084,8 @@ namespace RadminStreamApp
             Environment.Exit(0);
         }
 
-        public event PropertyChangedEventHandler PropertyChanged;
-        private void OnPropertyChanged([CallerMemberName] string name = null)
+        public event PropertyChangedEventHandler? PropertyChanged;
+        private void OnPropertyChanged([CallerMemberName] string? name = null)
             => PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(name));
     }
 }

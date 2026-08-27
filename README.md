@@ -7,8 +7,15 @@
 **Radmin Stream** é um aplicativo desktop desenvolvido em C# com WPF (.NET 8.0) focado na captura e transmissão de áudio e vídeo em tempo real. Ele foi projetado para facilitar sessões de streaming privadas com **amigos** via [Radmin VPN](https://www.radmin-vpn.com/), oferecendo opções avançadas de captura de tela e áudio (global ou por processo) usando WebSockets e WebRTC.
 
 > ⚠️ **Aviso de Segurança Importante!**
-> Este aplicativo foi feito **exclusivamente para ser usado entre amigos de confiança**. 
-> **Não o utilize com estranhos ou pessoas não confiáveis.** O projeto provavelmente possui vulnerabilidades de segurança, não foi auditado profissionalmente e não conta com proteções robustas contra usuários mal-intencionados na rede.
+> Este aplicativo foi feito **exclusivamente para ser usado entre amigos de confiança**.
+> **Não o utilize com estranhos ou pessoas não confiáveis.** O projeto não foi auditado profissionalmente.
+>
+> O que existe hoje de proteção:
+> * **Lista de permissão por IP** (ligada por padrão): só quem está na sua lista de amigos consegue abrir conexão. Pode ser desligada em *Configurações*.
+> * **Senha de sala opcional** com autenticação por desafio-resposta — a senha nunca trafega na rede; o viewer devolve um HMAC do desafio.
+> * **Criptografia AES-GCM** do conteúdo da sala, com chave derivada por PBKDF2 (200k iterações).
+>
+> O que **não** existe: TLS no canal de sinalização, certificados, ou qualquer defesa contra alguém que já tenha acesso privilegiado à sua rede virtual.
 
 ---
 
@@ -19,7 +26,9 @@ O projeto nasceu da seguinte necessidade:
 
 * **Para quem transmite (Host):**
   * Escolher qual monitor transmitir (suporte a múltiplas telas).
-  * Isolar o áudio de programas específicos (ex: não captar o áudio do Discord, para evitar retorno nas chamadas).
+  * Isolar o áudio de um programa específico — em *Configurações → Excluir o áudio de um programa*
+    você escolhe qual app fica fora da captura (ex.: o Discord, para evitar retorno nas chamadas).
+    Se o programa escolhido não estiver aberto, o app avisa que todo o áudio do sistema será transmitido.
   * O Host não ouve a própria transmissão.
 * **Para quem assiste (Join):**
   * Receber áudio e vídeo em alta qualidade (1080p).
@@ -60,11 +69,53 @@ O instalador final será gerado na raiz do projeto com o nome **`RadminStream_Se
 - `RadminStreamApp.csproj`: Arquivo principal do projeto C# WPF.
 - `setup.iss`: Script de configuração do Inno Setup utilizado para gerar o instalador final.
 - `publish_zip/`: Diretório temporário gerado durante a publicação (criado e apagado automaticamente).
-- **Bibliotecas Importantes**: 
+- `tests/RadminStreamApp.Tests/`: suíte de testes (xUnit). Rode com
+  `.\.dotnet\dotnet.exe test tests\RadminStreamApp.Tests\RadminStreamApp.Tests.csproj`.
+- `docs/`: documentos de planejamento.
+- `version.iss`: gerado pelo build a partir de `<Version>` no `.csproj` — **não editar à mão**.
+- **Bibliotecas Importantes**:
   - `Fleck` (WebSocket)
   - `NAudio` (Áudio)
-  - `SIPSorcery` (WebRTC)
+  - `SIPSorcery` (WebRTC — vídeo H.264 e áudio Opus)
+  - `Vortice.Direct3D11` / `Vortice.DXGI` (captura de tela via Desktop Duplication)
   - A DLL `ApplicationLoopback.dll` é preservada para fornecer suporte à captura de áudio específica por processo.
+
+---
+
+## 🎛️ Como a mídia trafega
+
+| Mídia | Codec | Transporte |
+|---|---|---|
+| Vídeo | H.264 (libx264, `ultrafast` + `zerolatency`) | Trilha de vídeo do WebRTC |
+| Áudio | Opus 48 kHz mono, quadros de 20 ms | Trilha de áudio do WebRTC |
+| Sinalização | JSON | WebSocket na porta 8080 |
+
+A captura de tela usa a **Desktop Duplication API (DXGI)**, com o `CopyFromScreen` do GDI como
+reserva automática para máquinas onde a duplicação não está disponível (RDP, drivers antigos).
+
+---
+
+## ⚖️ Limitações conhecidas
+
+- **`SIPSorcery` 8.0.23 tem advisories abertos** (`GHSA-28gm-jrmw-xx93`, `GHSA-jwjp-4649-v8jp`).
+  A correção só existe na linha 10.x, que exige **.NET 10** — migrar o projeto inteiro é o
+  pré-requisito para fechar esse ponto.
+- O canal de sinalização é `ws://` puro, sem TLS.
+
+---
+
+## 📦 Peso do repositório
+
+As DLLs do FFmpeg em `FFmpegLibs/` somam ~145 MB e estão no histórico do Git. O `.gitattributes`
+já as marca como LFS, o que evita que **futuras** atualizações delas engordem o histórico.
+
+Para remover os blobs já commitados é preciso **reescrever o histórico** — operação destrutiva,
+que invalida todos os clones existentes. Se for o caso, com todos avisados:
+
+```powershell
+git lfs migrate import --include="FFmpegLibs/*.dll" --everything
+git push --force-with-lease --all
+```
 
 ---
 

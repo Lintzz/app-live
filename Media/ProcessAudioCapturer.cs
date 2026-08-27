@@ -27,21 +27,21 @@ namespace RadminStreamApp
         private static extern int StopCaptureAsync();
 
         // Keep a reference to prevent GC from collecting the delegate
-        private AudioCallbackDelegate _callbackDelegate;
+        private AudioCallbackDelegate? _callbackDelegate;
         private bool _isCapturing = false;
         private bool _disposed = false;
 
         /// <summary>
         /// Fired when a chunk of PCM audio data is available.
-        /// The byte[] contains raw PCM data at 44100 Hz, 16-bit, stereo.
+        /// The byte[] contains raw PCM data at 48000 Hz, 16-bit, stereo.
         /// </summary>
-        public event Action<byte[]> OnAudioFrameReady;
+        public event Action<byte[]>? OnAudioFrameReady;
 
         /// <summary>
         /// Fired when the process audio capture encounters an error
         /// (e.g., OS doesn't support the API).
         /// </summary>
-        public event Action<string> OnCaptureError;
+        public event Action<string>? OnCaptureError;
 
         /// <summary>
         /// Starts capturing audio from a specific process.
@@ -61,8 +61,10 @@ namespace RadminStreamApp
                 _callbackDelegate = new AudioCallbackDelegate(OnAudioDataReceived);
                 SetAudioCallback(_callbackDelegate);
 
-                // Start capture: 2 channels, 44100 Hz, 16-bit
-                var result = StartCaptureAsync(processId, includeProcessTree, 2, 44100, 16);
+                // 48 kHz / estéreo: mesma taxa do loopback, para o Opus receber sempre
+                // o mesmo formato independentemente de qual caminho de captura está ativo.
+                var result = StartCaptureAsync(processId, includeProcessTree,
+                    AudioCapturer.Channels, AudioCapturer.SampleRate, 16);
 
                 if (result == IntPtr.Zero)
                 {

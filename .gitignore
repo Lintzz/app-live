@@ -12,3 +12,6 @@ publish_zip/
 
 # Instalador gerado
 RadminStream_Setup.exe
+
+# Gerado pelo build a partir de <Version> no .csproj
+version.iss

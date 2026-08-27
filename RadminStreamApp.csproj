@@ -9,17 +9,31 @@
     <UseWPF>true</UseWPF>
     <UseWindowsForms>true</UseWindowsForms>
     <Version>1.0.17</Version>
+    <!-- Version é a única fonte da verdade: AssemblyVersion, o texto na UI e o AppVersion
+         do Inno Setup saem todos daqui (o version.iss é gerado no build). -->
+    <AssemblyVersion>$(Version)</AssemblyVersion>
+    <FileVersion>$(Version)</FileVersion>
     <ApplicationIcon>app_icon.ico</ApplicationIcon>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
   </PropertyGroup>
+
+  <!-- O projeto de testes vive dentro da pasta do app; sem isto o glob padrão do SDK
+       compilaria os testes junto do executável. -->
+  <ItemGroup>
+    <Compile Remove="tests/**" />
+    <None Remove="tests/**" />
+    <Page Remove="tests/**" />
+  </ItemGroup>
 
   <ItemGroup>
     <PackageReference Include="Fleck" Version="1.2.0" />
     <PackageReference Include="NAudio" Version="2.2.1" />
-    <PackageReference Include="SIPSorcery" Version="8.0.7" />
+    <PackageReference Include="SIPSorcery" Version="8.0.23" />
     <PackageReference Include="SIPSorceryMedia.Encoders" Version="8.0.7" />
-    <PackageReference Include="SIPSorceryMedia.Windows" Version="8.0.7" />
     <PackageReference Include="SIPSorceryMedia.FFmpeg" Version="8.0.7" />
     <PackageReference Include="System.Drawing.Common" Version="10.0.11" />
+    <PackageReference Include="Vortice.Direct3D11" Version="3.6.2" />
+    <PackageReference Include="Vortice.DXGI" Version="3.6.2" />
     <PackageReference Include="Websocket.Client" Version="5.5.0" />
   </ItemGroup>
 
@@ -33,6 +47,14 @@
     </None>
     <Resource Include="app_icon.ico" />
   </ItemGroup>
+
+  <!-- Mantém o instalador em sincronia com a versão do projeto (setup.iss dá #include nele). -->
+  <Target Name="GenerateInnoSetupVersion" BeforeTargets="Build;Publish">
+    <WriteLinesToFile File="$(MSBuildProjectDirectory)/version.iss"
+                      Lines="#define AppVersion &quot;$(Version)&quot;"
+                      Overwrite="true"
+                      WriteOnlyWhenDifferent="true" />
+  </Target>
 
 </Project>
 

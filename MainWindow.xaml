@@ -529,11 +529,19 @@
                                 <ItemsControl.ItemTemplate>
                                     <DataTemplate>
                                         <Border Background="#1E1E24" CornerRadius="6" Margin="0,0,0,6" Padding="8,7"
-                                                Cursor="Hand" BorderThickness="1" BorderBrush="Transparent"
+                                                BorderThickness="1" BorderBrush="Transparent"
                                                 MouseLeftButtonUp="FriendCard_Click" ToolTip="{Binding StatusTooltip}">
                                             <Border.Style>
                                                 <Style TargetType="Border">
+                                                    <!-- Sem live para entrar, o card não é clicável: seta normal
+                                                         e sem hit test, em vez de abrir uma conexão inútil. -->
+                                                    <Setter Property="Cursor" Value="Arrow"/>
+                                                    <Setter Property="IsHitTestVisible" Value="False"/>
                                                     <Style.Triggers>
+                                                        <DataTrigger Binding="{Binding CanWatch}" Value="True">
+                                                            <Setter Property="Cursor" Value="Hand"/>
+                                                            <Setter Property="IsHitTestVisible" Value="True"/>
+                                                        </DataTrigger>
                                                         <DataTrigger Binding="{Binding IsWatching}" Value="True">
                                                             <Setter Property="Background" Value="#16324A"/>
                                                             <Setter Property="BorderBrush" Value="#0094F2"/>
@@ -541,6 +549,14 @@
                                                         <DataTrigger Binding="{Binding IsOnline}" Value="False">
                                                             <Setter Property="Opacity" Value="0.45"/>
                                                         </DataTrigger>
+                                                        <MultiDataTrigger>
+                                                            <MultiDataTrigger.Conditions>
+                                                                <Condition Binding="{Binding IsOnline}" Value="True"/>
+                                                                <Condition Binding="{Binding IsStreaming}" Value="False"/>
+                                                                <Condition Binding="{Binding IsWatching}" Value="False"/>
+                                                            </MultiDataTrigger.Conditions>
+                                                            <Setter Property="Opacity" Value="0.7"/>
+                                                        </MultiDataTrigger>
                                                     </Style.Triggers>
                                                 </Style>
                                             </Border.Style>
@@ -567,7 +583,7 @@
                                                                     <Setter Property="Text" Value="&#xE71A;"/>
                                                                     <Setter Property="Foreground" Value="#FF6B6B"/>
                                                                 </DataTrigger>
-                                                                <DataTrigger Binding="{Binding IsOnline}" Value="False">
+                                                                <DataTrigger Binding="{Binding CanWatch}" Value="False">
                                                                     <Setter Property="Text" Value=""/>
                                                                 </DataTrigger>
                                                             </Style.Triggers>
@@ -703,6 +719,19 @@
                                 <StackPanel>
                                     <CheckBox x:Name="ChkMaxPerformance" Content="Modo de Desempenho Máximo (Menos uso de CPU)" Foreground="White" FontSize="14" IsChecked="True" Checked="ChkMaxPerformance_Changed" Unchecked="ChkMaxPerformance_Changed"/>
                                     <TextBlock Text="Ativar esta opção diminui a prioridade do aplicativo para garantir que seus jogos rodem com mais FPS, além de otimizar os cálculos da transmissão." Foreground="#AAAAAA" FontSize="12" TextWrapping="Wrap" Margin="20,5,0,0"/>
+
+                                    <CheckBox x:Name="ChkFriendsOnly" Content="Aceitar conexões somente de amigos salvos" Foreground="White" FontSize="14" IsChecked="True" Margin="0,18,0,0" Checked="ChkFriendsOnly_Changed" Unchecked="ChkFriendsOnly_Changed"/>
+                                    <TextBlock Text="Com esta opção desligada, qualquer máquina da VPN consegue entrar em uma live sem senha." Foreground="#AAAAAA" FontSize="12" TextWrapping="Wrap" Margin="20,5,0,0"/>
+
+                                    <CheckBox x:Name="ChkForceGdiCapture" Content="Usar captura clássica de tela (GDI)" Foreground="White" FontSize="14" Margin="0,18,0,0" Checked="ChkForceGdiCapture_Changed" Unchecked="ChkForceGdiCapture_Changed"/>
+                                    <TextBlock Text="Por padrão a tela é capturada pela Desktop Duplication (DXGI), mais leve. Marque esta opção se a transmissão ficar preta, travada ou com a imagem deslocada." Foreground="#AAAAAA" FontSize="12" TextWrapping="Wrap" Margin="20,5,0,0"/>
+
+                                    <TextBlock Text="Excluir o áudio de um programa" Foreground="White" FontSize="14" Margin="0,18,0,0"/>
+                                    <TextBlock Text="O áudio deste programa não entra na transmissão — útil para o app de chamada de voz, evitando que seus amigos ouçam a si mesmos." Foreground="#AAAAAA" FontSize="12" TextWrapping="Wrap" Margin="0,4,0,6"/>
+                                    <ComboBox x:Name="CboAudioExclusion" Height="30" FontSize="13"
+                                              DropDownOpened="CboAudioExclusion_DropDownOpened"
+                                              SelectionChanged="CboAudioExclusion_SelectionChanged"/>
+                                    <TextBlock x:Name="AudioExclusionWarning" Foreground="#E8A33D" FontSize="12" TextWrapping="Wrap" Margin="0,6,0,0" Visibility="Collapsed"/>
                                 </StackPanel>
                             </Grid>
                         </TabItem>
@@ -712,7 +741,7 @@
                             <Grid Margin="10,20,10,10">
                                 <StackPanel VerticalAlignment="Center" HorizontalAlignment="Center">
                                     <TextBlock Text="Radmin Stream Live" Foreground="White" FontSize="16" FontWeight="Bold" HorizontalAlignment="Center"/>
-                                    <TextBlock Text="Versão 1.0.17" Foreground="#AAAAAA" FontSize="14" HorizontalAlignment="Center" Margin="0,5,0,20"/>
+                                    <TextBlock x:Name="VersionText" Text="Versão" Foreground="#AAAAAA" FontSize="14" HorizontalAlignment="Center" Margin="0,5,0,20"/>
                                     
                                     <TextBlock Foreground="#0094F2" FontSize="14" HorizontalAlignment="Center" Cursor="Hand" TextDecorations="Underline" MouseLeftButtonDown="GithubLink_Click">
                                         GitHub Repository

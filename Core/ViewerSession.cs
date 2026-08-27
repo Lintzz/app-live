@@ -20,19 +20,20 @@ namespace RadminStreamApp
         public string Ip => Friend.Ip;
         public string FriendName => Friend.DisplayName;
 
-        private SignalingClient _client;
-        private StreamManager _streamManager;
+        private SignalingClient? _client;
+        private StreamManager? _streamManager;
         private string _password = string.Empty;
+        private string _authChallenge = string.Empty;
         private bool _streamEnded;
         private bool _disposed;
 
         /// <summary>Disparado quando o host exige senha. bool = a senha anterior foi recusada.</summary>
         public event Action<ViewerSession, bool> PasswordRequested = delegate {};
 
-        public event PropertyChangedEventHandler PropertyChanged;
+        public event PropertyChangedEventHandler? PropertyChanged;
 
-        private WriteableBitmap _videoBitmap;
-        public WriteableBitmap VideoBitmap { get => _videoBitmap; private set => SetProperty(ref _videoBitmap, value); }
+        private WriteableBitmap? _videoBitmap;
+        public WriteableBitmap? VideoBitmap { get => _videoBitmap; private set => SetProperty(ref _videoBitmap, value); }
 
         private string _statusText = "Conectando...";
         public string StatusText { get => _statusText; private set => SetProperty(ref _statusText, value); }
@@ -101,8 +102,12 @@ namespace RadminStreamApp
 
             _client.OnMessageReceived += async (message) =>
             {
-                if (message == "AUTH_REQUIRED")
+                var authMsg = SignalingMessage.Deserialize(message);
+                if (authMsg != null && authMsg.Type == "AUTH_REQUIRED")
                 {
+                    // O desafio muda a cada tentativa; guardamos o último para montar a prova.
+                    _authChallenge = authMsg.Data ?? string.Empty;
+
                     if (string.IsNullOrEmpty(_password))
                     {
                         StatusText = "Esta sala pede senha";
@@ -114,14 +119,15 @@ namespace RadminStreamApp
                     }
                     return;
                 }
-                if (message == "AUTH_FAIL")
+                if (authMsg != null && authMsg.Type == "AUTH_FAIL")
                 {
                     _password = string.Empty;
+                    _authChallenge = string.Empty;
                     StatusText = "Senha incorreta";
                     RaiseOnUi(() => PasswordRequested?.Invoke(this, true));
                     return;
                 }
-                if (message == "AUTH_OK")
+                if (authMsg != null && authMsg.Type == "AUTH_OK")
                 {
                     _client.EnableEncryption(_password);
                     StatusText = "Conectando...";
@@ -165,8 +171,6 @@ namespace RadminStreamApp
                     await _streamManager.HandleSignalingMessage("host", message);
             };
 
-            _client.OnBinaryReceived += (data) => _streamManager?.ProcessReceivedBinary(data);
-
             _client.OnConnected += async (isReconnect) =>
             {
                 if (isReconnect)
@@ -205,9 +209,17 @@ namespace RadminStreamApp
             Disconnect();
         }
 
+        /// <summary>
+        /// Responde ao desafio com o HMAC da senha derivada. A senha em si nunca sai daqui —
+        /// antes ela ia em texto claro sobre ws:// e era legível por qualquer um na VPN.
+        /// </summary>
         private void SendAuth()
         {
-            var authMsg = new SignalingMessage { Type = "AUTH", Data = _password };
+            if (string.IsNullOrEmpty(_authChallenge)) return;
+
+            var key = CryptoHelper.DeriveKey(_password);
+            var proof = CryptoHelper.ComputeAuthProof(key, _authChallenge);
+            var authMsg = new SignalingMessage { Type = "AUTH", Data = proof };
             _client?.SendMessage(SignalingMessage.Serialize(authMsg));
         }
 
@@ -264,6 +276,8 @@ namespace RadminStreamApp
                 {
                     VideoBitmap = new WriteableBitmap(width, height, 96, 96, PixelFormats.Bgr24, null);
                 }
+
+                if (_videoBitmap == null) return;
 
                 _videoBitmap.Lock();
                 Marshal.Copy(pixelData, 0, _videoBitmap.BackBuffer, pixelData.Length);
@@ -338,7 +352,7 @@ namespace RadminStreamApp
             else app.Dispatcher.InvokeAsync(action);
         }
 
-        private bool SetProperty<T>(ref T field, T value, [CallerMemberName] string name = null)
+        private bool SetProperty<T>(ref T field, T value, [CallerMemberName] string? name = null)
         {
             if (Equals(field, value)) return false;
             field = value;
@@ -346,7 +360,7 @@ namespace RadminStreamApp
             return true;
         }
 
-        private void RaisePropertyChanged(string name)
+        private void RaisePropertyChanged(string? name)
         {
             var app = System.Windows.Application.Current;
             var args = new PropertyChangedEventArgs(name);

@@ -1,6 +1,9 @@
+; version.iss é gerado pelo build a partir de <Version> no .csproj — não editar à mão.
+#include "version.iss"
+
 [Setup]
 AppName=Radmin Stream Live
-AppVersion=1.0.17
+AppVersion={#AppVersion}
 DefaultDirName={pf}\Radmin Stream Live
 DefaultGroupName=Radmin Stream Live
 UninstallDisplayIcon={app}\RadminStreamApp.exe

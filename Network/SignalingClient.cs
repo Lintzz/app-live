@@ -12,12 +12,12 @@ namespace RadminStreamApp
         private static readonly TimeSpan ReconnectDelay = TimeSpan.FromSeconds(5);
         private static readonly TimeSpan PingInterval = TimeSpan.FromSeconds(3);
 
-        private WebsocketClient _client;
+        private WebsocketClient? _client;
         private bool _intentionalStop = false;
         private int _reconnectAttempts = 0;
-        private CancellationTokenSource _reconnectCts;
-        private System.Threading.Timer _pingTimer;
-        private byte[] _encryptionKey;
+        private CancellationTokenSource? _reconnectCts;
+        private System.Threading.Timer? _pingTimer;
+        private byte[]? _encryptionKey;
 
         public event Action<string> OnMessageReceived = delegate {};
         public event Action<byte[]> OnBinaryReceived = delegate {};
@@ -112,7 +112,7 @@ namespace RadminStreamApp
             OnMessageReceived?.Invoke(plain);
         }
 
-        private void SendPing(object state)
+        private void SendPing(object? state)
         {
             try
             {
@@ -147,7 +147,7 @@ namespace RadminStreamApp
 
                 try
                 {
-                    await _client.Reconnect();
+                    if (_client != null) await _client.Reconnect();
                 }
                 catch (Exception ex)
                 {

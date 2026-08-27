@@ -16,19 +16,19 @@ namespace RadminStreamApp
             InitializeComponent();
         }
 
-        private ViewerSession Session => DataContext as ViewerSession;
+        private ViewerSession? Session => DataContext as ViewerSession;
 
         private void Root_MouseLeftButtonDown(object sender, System.Windows.Input.MouseButtonEventArgs e)
         {
             if (Session == null) return;
 
-            OnActivated?.Invoke(Session);
-            if (e.ClickCount == 2) OnFocusRequested?.Invoke(Session);
+            if (Session != null) OnActivated?.Invoke(Session);
+            if (e.ClickCount == 2) if (Session != null) OnFocusRequested?.Invoke(Session);
         }
 
         private void BtnClose_Click(object sender, RoutedEventArgs e)
         {
-            if (Session != null) OnCloseRequested?.Invoke(Session);
+            if (Session != null) if (Session != null) OnCloseRequested?.Invoke(Session);
         }
     }
 }

@@ -56,7 +56,7 @@ public partial class App : System.Windows.Application
         return false;
     }
 
-    private static System.Collections.Generic.IEnumerable<Exception> Flatten(Exception ex)
+    private static System.Collections.Generic.IEnumerable<Exception> Flatten(Exception? ex)
     {
         if (ex is AggregateException agg)
         {
@@ -67,14 +67,15 @@ public partial class App : System.Windows.Application
         while (ex != null) { yield return ex; ex = ex.InnerException; }
     }
 
-    private static void Log(string origin, Exception ex)
+    private static void Log(string origin, Exception? ex)
     {
         if (ex == null) return;
         if (IsExpectedSocketAbort(ex)) return;
 
         try
         {
-            Directory.CreateDirectory(Path.GetDirectoryName(LogPath));
+            var logDir = Path.GetDirectoryName(LogPath);
+            if (logDir != null) Directory.CreateDirectory(logDir);
             File.AppendAllText(LogPath,
                 $"=== {DateTime.Now:yyyy-MM-dd HH:mm:ss} [{origin}]{Environment.NewLine}{ex}{Environment.NewLine}{Environment.NewLine}");
         }

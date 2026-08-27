@@ -2,10 +2,10 @@ using System;
 using System.Collections.Generic;
 using System.Threading.Tasks;
 using SIPSorcery.Net;
+using SIPSorcery.Media;
 using SIPSorceryMedia.Abstractions;
 using SIPSorceryMedia.Encoders;
 using SIPSorceryMedia.FFmpeg;
-using SIPSorceryMedia.Windows;
 using System.Diagnostics;
 using System.Drawing;
 using System.Runtime.InteropServices;
@@ -18,41 +18,65 @@ namespace RadminStreamApp
 {
     public class StreamManager
     {
-        private Dictionary<string, RTCPeerConnection> _peerConnections = new Dictionary<string, RTCPeerConnection>();
-        private VideoCapturer _videoCapturer;
-        private AudioCapturer _audioCapturer;
-        private IVideoEncoder _videoEncoder;
-        private object _encoderLock = new object();
+        private readonly Dictionary<string, RTCPeerConnection> _peerConnections = new Dictionary<string, RTCPeerConnection>();
+        private readonly VideoCapturer _videoCapturer;
+        private readonly AudioCapturer _audioCapturer;
+        private IVideoEncoder? _videoEncoder;
+        private readonly object _encoderLock = new object();
         private int _isEncoding = 0;
-        private int _frameCount = 0;
         private bool _isMaxPerformance = true;
 
+        // Keyframe por tempo decorrido, não por contagem de frames: a taxa real de captura
+        // varia bastante, então "a cada 120 frames" dava um intervalo imprevisível.
+        private static readonly TimeSpan KeyFrameInterval = TimeSpan.FromSeconds(2);
+        private readonly Stopwatch _keyFrameClock = Stopwatch.StartNew();
+        private TimeSpan _lastKeyFrame = TimeSpan.Zero;
+
+        // ───────────────────────────── Áudio (Opus/WebRTC) ─────────────────────────────
+
+        // 20 ms a 48 kHz. O áudio agora viaja pela própria trilha WebRTC em Opus (~40 kbps)
+        // no lugar de PCM cru pelo WebSocket (~1,4 Mbps por viewer, e sem sincronia com o vídeo).
+        private const int OpusFrameSamples = 960;
+        private const int OpusSampleRate = 48000;
+
+        private readonly AudioEncoder _audioEncoder = new AudioEncoder(includeLinearFormats: false, includeOpus: true);
+        private readonly AudioFormat _opusFormat;
+        private readonly List<byte> _pcmAccumulator = new List<byte>();
+        private readonly object _pcmLock = new object();
+
         // Signaling events
-        public event Action<string, string> OnLocalSdpReady; // clientId, sdp (JSON SignalingMessage)
-        
+        public event Action<string, string>? OnLocalSdpReady; // clientId, sdp (JSON SignalingMessage)
+
         // Media events
-        public event Action<byte[]> OnBinaryDataReady; // Used for Audio via WebSocket
-        public event Action<byte[], int, int, int> OnVideoFrameDecoded; // payload, width, height, stride
-        public event Action<byte[], int, int, int> OnLocalVideoFrameReady; // raw local pixels
-        
-        public event Action<string> OnAudioCaptureError;
-        public event Action<string> OnConnectionStateChanged; // WebRTC connection state
+        public event Action<byte[], int, int, int>? OnVideoFrameDecoded; // payload, width, height, stride
+        public event Action<byte[], int, int, int>? OnLocalVideoFrameReady; // raw local pixels
 
-        public event Action<int, double> OnHostStatsUpdated; // fps, kbps
-        public event Action<int> OnViewerFpsUpdated; // fps
+        public event Action<string>? OnAudioCaptureError;
+        public event Action<string>? OnConnectionStateChanged; // WebRTC connection state
 
-        private System.Threading.Timer _hostStatsTimer;
-        private System.Threading.Timer _viewerStatsTimer;
+        public event Action<int, double>? OnHostStatsUpdated; // fps, kbps
+        public event Action<int>? OnViewerFpsUpdated; // fps
+
+        private System.Threading.Timer? _hostStatsTimer;
+        private System.Threading.Timer? _viewerStatsTimer;
         private int _statsEncodedFrames = 0;
         private long _statsEncodedBytes = 0;
         private int _statsDecodedFrames = 0;
 
-        private WaveOutEvent _waveOut;
-        private BufferedWaveProvider _waveProvider;
-        private NAudio.Wave.SampleProviders.VolumeSampleProvider _volumeProvider;
+        private WaveOutEvent? _waveOut;
+        private BufferedWaveProvider? _waveProvider;
+        private LatencyTrimmingProvider? _latencyTrimmer;
+        private NAudio.Wave.SampleProviders.VolumeSampleProvider? _volumeProvider;
         private bool _isHost = false;
-        
-        private void WriteLog(string filename, string content)
+
+        // Teto de atraso do áudio. Passou disso, o excedente é descartado até o alvo — é o
+        // que impede a live de ir ficando dessincronizada ao longo da sessão.
+        private static readonly TimeSpan MaxAudioLatency = TimeSpan.FromMilliseconds(250);
+        private static readonly TimeSpan TargetAudioLatency = TimeSpan.FromMilliseconds(80);
+
+        private static int _mediaInitialized;
+
+        private static void WriteLog(string filename, string content)
         {
             try
             {
@@ -63,17 +87,30 @@ namespace RadminStreamApp
             catch { }
         }
 
-        public StreamManager()
+        /// <summary>
+        /// Inicialização global de mídia — uma vez por processo. Antes rodava no construtor,
+        /// e como existe um StreamManager por live aberta, o FFmpeg era reinicializado (e o
+        /// diretório corrente do processo trocado) a cada sessão.
+        /// </summary>
+        public static void EnsureMediaInitialized()
         {
-            // Set current directory to the app directory so FFmpeg can find its binaries if it relies on CWD
+            if (System.Threading.Interlocked.Exchange(ref _mediaInitialized, 1) != 0) return;
+
             var baseDir = AppDomain.CurrentDomain.BaseDirectory;
             if (System.IO.Directory.Exists(baseDir))
             {
                 Environment.CurrentDirectory = baseDir;
             }
-            
-            try { SIPSorceryMedia.FFmpeg.FFmpegInit.Initialise(); } 
+
+            try { SIPSorceryMedia.FFmpeg.FFmpegInit.Initialise(); }
             catch (Exception ex) { WriteLog("ffmpeg_error.log", "Init Error: " + ex.ToString()); }
+        }
+
+        public StreamManager()
+        {
+            EnsureMediaInitialized();
+
+            _opusFormat = _audioEncoder.SupportedFormats.First(f => f.Codec == AudioCodecsEnum.OPUS);
 
             InitEncoder();
 
@@ -81,29 +118,30 @@ namespace RadminStreamApp
             _audioCapturer = new AudioCapturer();
 
             // Connect raw video from capturer to encoder
-            _videoCapturer.OnVideoSourceRawSample += (duration, width, height, sample, format) => 
+            _videoCapturer.OnVideoSourceRawSample += (duration, width, height, sample, format) =>
             {
                 OnLocalVideoFrameReady?.Invoke(sample, width, height, width * 3); // 24bpp
-                
+
                 if (System.Threading.Interlocked.CompareExchange(ref _isEncoding, 1, 0) != 0)
                 {
                     return; // Skip encoding if previous frame is still processing
                 }
 
-                Task.Run(() => 
+                Task.Run(() =>
                 {
                     try
                     {
-                        byte[] encoded = null;
+                        byte[]? encoded = null;
                         lock (_encoderLock)
                         {
                             if (_videoEncoder != null)
                             {
                                 try
                                 {
-                                    _frameCount++;
-                                    if (_frameCount % 120 == 0) // Força um KeyFrame a cada 2 segundos (60fps)
+                                    var now = _keyFrameClock.Elapsed;
+                                    if (now - _lastKeyFrame >= KeyFrameInterval)
                                     {
+                                        _lastKeyFrame = now;
                                         _videoEncoder.ForceKeyFrame();
                                     }
                                     encoded = _videoEncoder.EncodeVideo(width, height, sample, format, VideoCodecsEnum.H264);
@@ -120,15 +158,9 @@ namespace RadminStreamApp
                             System.Threading.Interlocked.Increment(ref _statsEncodedFrames);
                             System.Threading.Interlocked.Add(ref _statsEncodedBytes, encoded.Length);
 
-                            lock (_peerConnections)
+                            foreach (var pc in SnapshotConnectedPeers())
                             {
-                                foreach (var pc in _peerConnections.Values)
-                                {
-                                    if (pc.connectionState == RTCPeerConnectionState.connected)
-                                    {
-                                        pc.SendVideo(duration, encoded);
-                                    }
-                                }
+                                try { pc.SendVideo(duration, encoded); } catch { }
                             }
                         }
                     }
@@ -139,14 +171,7 @@ namespace RadminStreamApp
                 });
             };
 
-            // Keep audio on WebSockets for reliable multi-client delivery
-            _audioCapturer.OnAudioFrameReady += (pcm) => 
-            {
-                var data = new byte[pcm.Length + 1];
-                data[0] = 1; // 1 = Audio
-                Buffer.BlockCopy(pcm, 0, data, 1, pcm.Length);
-                OnBinaryDataReady?.Invoke(data);
-            };
+            _audioCapturer.OnAudioFrameReady += OnCapturedPcm;
 
             _audioCapturer.OnCaptureError += (error) =>
             {
@@ -154,15 +179,100 @@ namespace RadminStreamApp
             };
         }
 
-        public void ProcessReceivedBinary(byte[] data)
+        /// <summary>
+        /// Fatia o PCM capturado (48 kHz estéreo) em quadros Opus de 20 ms e envia pela
+        /// trilha de áudio do WebRTC. O downmix para mono é intencional: o Opus do SIPSorcery
+        /// expõe a trilha como mono, e o ganho de banda compensa numa transmissão de tela.
+        /// </summary>
+        private void OnCapturedPcm(byte[] pcm)
         {
-            if (data == null || data.Length == 0) return;
-            
-            if (data[0] == 1 && _waveProvider != null) // Audio
+            const int frameBytes = OpusFrameSamples * AudioCapturer.Channels * 2; // estéreo 16-bit
+
+            List<byte[]> framesToSend = new List<byte[]>();
+
+            lock (_pcmLock)
             {
-                var pcm = new byte[data.Length - 1];
-                Buffer.BlockCopy(data, 1, pcm, 0, pcm.Length);
-                _waveProvider.AddSamples(pcm, 0, pcm.Length);
+                _pcmAccumulator.AddRange(pcm);
+
+                // Se acumulou muito (viewer travado, encoder lento), descarta o excedente
+                // antigo em vez de deixar a latência do áudio crescer indefinidamente.
+                int maxBacklog = frameBytes * 10; // ~200 ms
+                if (_pcmAccumulator.Count > maxBacklog)
+                {
+                    _pcmAccumulator.RemoveRange(0, _pcmAccumulator.Count - maxBacklog);
+                }
+
+                while (_pcmAccumulator.Count >= frameBytes)
+                {
+                    var frame = new byte[frameBytes];
+                    _pcmAccumulator.CopyTo(0, frame, 0, frameBytes);
+                    _pcmAccumulator.RemoveRange(0, frameBytes);
+                    framesToSend.Add(frame);
+                }
+            }
+
+            if (framesToSend.Count == 0) return;
+
+            var peers = SnapshotConnectedPeers();
+            if (peers.Count == 0) return;
+
+            foreach (var frame in framesToSend)
+            {
+                var mono = DownmixToMono(frame);
+
+                byte[] encoded;
+                try { encoded = _audioEncoder.EncodeAudio(mono, _opusFormat); }
+                catch (Exception ex) { WriteLog("opus_encode_error.log", ex.ToString()); continue; }
+
+                System.Threading.Interlocked.Add(ref _statsEncodedBytes, encoded.Length);
+
+                foreach (var pc in peers)
+                {
+                    try { pc.SendAudio(OpusFrameSamples, encoded); } catch { }
+                }
+            }
+        }
+
+        private static short[] DownmixToMono(byte[] interleavedStereo)
+        {
+            int samples = interleavedStereo.Length / 4; // 2 canais * 2 bytes
+            var mono = new short[samples];
+            for (int i = 0; i < samples; i++)
+            {
+                short left = BitConverter.ToInt16(interleavedStereo, i * 4);
+                short right = BitConverter.ToInt16(interleavedStereo, i * 4 + 2);
+                mono[i] = (short)((left + right) / 2);
+            }
+            return mono;
+        }
+
+        private List<RTCPeerConnection> SnapshotConnectedPeers()
+        {
+            lock (_peerConnections)
+            {
+                return _peerConnections.Values
+                    .Where(pc => pc.connectionState == RTCPeerConnectionState.connected)
+                    .ToList();
+            }
+        }
+
+        /// <summary>Decodifica um pacote Opus recebido e entrega ao dispositivo de saída.</summary>
+        private void OnAudioRtpReceived(RTPPacket packet)
+        {
+            if (_waveProvider == null || packet?.Payload == null || packet.Payload.Length == 0) return;
+
+            try
+            {
+                var pcm = _audioEncoder.DecodeAudio(packet.Payload, _opusFormat);
+                if (pcm == null || pcm.Length == 0) return;
+
+                var bytes = new byte[pcm.Length * 2];
+                Buffer.BlockCopy(pcm, 0, bytes, 0, bytes.Length);
+                _waveProvider.AddSamples(bytes, 0, bytes.Length);
+            }
+            catch (Exception ex)
+            {
+                WriteLog("opus_decode_error.log", ex.ToString());
             }
         }
 
@@ -174,6 +284,12 @@ namespace RadminStreamApp
             }
         }
 
+        /// <summary>Força o caminho GDI de captura (ver <see cref="VideoCapturer"/>).</summary>
+        public void SetForceGdiCapture(bool forceGdi) => _videoCapturer?.SetForceGdiCapture(forceGdi);
+
+        /// <summary>Caminho de captura em uso — "DXGI" ou "GDI".</summary>
+        public string ActiveCaptureMode => _videoCapturer?.ActiveCaptureMode ?? "—";
+
         public void SetResolution(int width, int height)
         {
             _videoCapturer?.SetResolution(width, height);
@@ -183,7 +299,7 @@ namespace RadminStreamApp
         {
             _isMaxPerformance = isMaxPerformance;
             _videoCapturer?.SetMaxPerformanceMode(isMaxPerformance);
-            
+
             lock (_encoderLock)
             {
                 if (_videoEncoder != null)
@@ -198,21 +314,15 @@ namespace RadminStreamApp
         public void SetTargetSource(CaptureSource source)
         {
             _videoCapturer.SetTargetSource(source);
-            
-            var discordProcesses = Process.GetProcessesByName("Discord");
-            uint targetDiscordPid = 0;
-            foreach (var p in discordProcesses)
-            {
-                if (p.MainWindowHandle != IntPtr.Zero)
-                {
-                    targetDiscordPid = (uint)p.Id;
-                    break;
-                }
-            }
-            if (targetDiscordPid == 0 && discordProcesses.Length > 0)
-                targetDiscordPid = (uint)discordProcesses[0].Id;
+        }
 
-            _audioCapturer.SetTargetProcess(targetDiscordPid);
+        /// <summary>
+        /// Define qual processo fica FORA da captura de áudio (0 = capturar tudo). Antes isto
+        /// era fixo no Discord e invisível para o usuário; agora vem da escolha nas configurações.
+        /// </summary>
+        public void SetExcludedAudioProcess(uint processId)
+        {
+            _audioCapturer.SetTargetProcess(processId);
         }
 
         private void InitEncoder()
@@ -224,12 +334,12 @@ namespace RadminStreamApp
                     // A versão atual do SIPSorcery para .NET 8 não expõe API para selecionar NVENC/AMF nativamente.
                     // Portanto, usamos o libx264 com perfil 'ultrafast' e 'zerolatency' para garantir baixíssimo uso de CPU,
                     // simulando a performance de uma GPU. Quando não estiver no modo desempenho, usa 'veryfast'.
-                    var x264Options = new Dictionary<string, string> 
-                    { 
+                    var x264Options = new Dictionary<string, string>
+                    {
                         { "preset", _isMaxPerformance ? "ultrafast" : "veryfast" },
                         { "tune", "zerolatency" }
                     };
-                    
+
                     _videoEncoder = new FFmpegVideoEncoder(x264Options);
                 }
             }
@@ -260,25 +370,31 @@ namespace RadminStreamApp
             return Task.CompletedTask;
         }
 
-        public Task InitializeClient()
+        public async Task InitializeClient()
         {
             InitEncoder();
             _isHost = false;
             if (_waveOut == null)
             {
-                _waveProvider = new BufferedWaveProvider(new WaveFormat(44100, 16, 2));
-                _waveProvider.DiscardOnBufferOverflow = true;
-                
-                _volumeProvider = new NAudio.Wave.SampleProviders.VolumeSampleProvider(_waveProvider.ToSampleProvider());
+                // Mono 48 kHz: é o formato que sai do decodificador Opus.
+                _waveProvider = new BufferedWaveProvider(new WaveFormat(OpusSampleRate, 16, 1))
+                {
+                    DiscardOnBufferOverflow = true,
+                    BufferDuration = TimeSpan.FromMilliseconds(800)
+                };
+
+                _latencyTrimmer = new LatencyTrimmingProvider(_waveProvider, MaxAudioLatency, TargetAudioLatency);
+
+                _volumeProvider = new NAudio.Wave.SampleProviders.VolumeSampleProvider(_latencyTrimmer.ToSampleProvider());
                 _volumeProvider.Volume = 1.0f;
-                
+
                 _waveOut = new WaveOutEvent();
                 _waveOut.Init(_volumeProvider);
                 _waveOut.Play();
             }
-            
+
             // Client creates a single connection (to the host)
-            CreatePeerConnection("host");
+            await CreatePeerConnection("host");
 
             _viewerStatsTimer = new System.Threading.Timer(_ =>
             {
@@ -286,23 +402,27 @@ namespace RadminStreamApp
                 OnViewerFpsUpdated?.Invoke(fps);
             }, null, 1000, 1000);
 
-            return Task.CompletedTask;
+
         }
 
-        public async void CreatePeerConnection(string clientId)
+        /// <summary>
+        /// Cria a conexão WebRTC do peer. Era <c>async void</c>: exceções em createOffer se
+        /// perdiam no TaskScheduler e o chamador não tinha como esperar o offer sair.
+        /// </summary>
+        public async Task CreatePeerConnection(string clientId)
         {
             var pc = new RTCPeerConnection(null);
-            
+
             // Both host and client need to know they support H264
             var videoFormat = new SDPAudioVideoMediaFormat(new VideoFormat(VideoCodecsEnum.H264, 96));
             var videoTrack = new MediaStreamTrack(SDPMediaTypesEnum.video, false, new List<SDPAudioVideoMediaFormat> { videoFormat });
             pc.addTrack(videoTrack);
 
-            if (_isHost)
-            {
-                // Host only logic (no extra init needed for track right now)
-            }
-            else
+            var audioTrack = new MediaStreamTrack(SDPMediaTypesEnum.audio, false,
+                new List<SDPAudioVideoMediaFormat> { new SDPAudioVideoMediaFormat(_opusFormat) });
+            pc.addTrack(audioTrack);
+
+            if (!_isHost)
             {
                 bool firstFrame = true;
                 pc.OnVideoFrameReceived += (IPEndPoint rep, uint timestamp, byte[] payload, VideoFormat format) =>
@@ -312,7 +432,7 @@ namespace RadminStreamApp
                         firstFrame = false;
                         OnConnectionStateChanged?.Invoke("Decoding Video...");
                     }
-                    List<SIPSorceryMedia.Abstractions.VideoSample> samples = null;
+                    List<SIPSorceryMedia.Abstractions.VideoSample>? samples = null;
                     lock (_encoderLock)
                     {
                         if (_videoEncoder != null)
@@ -336,6 +456,11 @@ namespace RadminStreamApp
                             OnVideoFrameDecoded?.Invoke(sample.Sample, (int)sample.Width, (int)sample.Height, (int)(sample.Width * 3));
                         }
                     }
+                };
+
+                pc.OnRtpPacketReceived += (IPEndPoint rep, SDPMediaTypesEnum mediaType, RTPPacket packet) =>
+                {
+                    if (mediaType == SDPMediaTypesEnum.audio) OnAudioRtpReceived(packet);
                 };
             }
 
@@ -384,22 +509,28 @@ namespace RadminStreamApp
                 return;
             }
 
-            RTCPeerConnection pc;
+            RTCPeerConnection? pc;
+            bool needsCreate = false;
             lock (_peerConnections)
             {
                 if (!_peerConnections.TryGetValue(clientId, out pc))
                 {
-                    if (_isHost)
-                    {
-                        CreatePeerConnection(clientId);
-                        pc = _peerConnections[clientId];
-                    }
-                    else
-                    {
-                        return;
-                    }
+                    if (!_isHost) return;
+                    needsCreate = true;
                 }
             }
+
+            // Fora do lock: CreatePeerConnection tem awaits e não deve segurar o cadeado.
+            if (needsCreate)
+            {
+                await CreatePeerConnection(clientId);
+                lock (_peerConnections)
+                {
+                    if (!_peerConnections.TryGetValue(clientId, out pc)) return;
+                }
+            }
+
+            if (pc == null) return;
 
             if (msg.Type == "offer")
             {
@@ -449,6 +580,7 @@ namespace RadminStreamApp
                 }
             }
         }
+
         public void RemoveClient(string clientId)
         {
             lock (_peerConnections)
@@ -460,7 +592,7 @@ namespace RadminStreamApp
                 }
             }
         }
-        
+
         public void Stop()
         {
             _hostStatsTimer?.Dispose();
@@ -473,12 +605,14 @@ namespace RadminStreamApp
             _waveOut?.Stop();
             _waveOut?.Dispose();
             _waveOut = null;
-            
+
+            lock (_pcmLock) { _pcmAccumulator.Clear(); }
+
             lock (_peerConnections)
             {
-                foreach(var pc in _peerConnections.Values)
+                foreach (var pc in _peerConnections.Values)
                 {
-                    pc.Close("Closed by user");
+                    try { pc.Close("Closed by user"); } catch { }
                 }
                 _peerConnections.Clear();
             }

@@ -6,7 +6,7 @@ namespace RadminStreamApp
 {
     public class CaptureSource
     {
-        public string Title { get; set; }
+        public string Title { get; set; } = string.Empty;
         public System.Drawing.Rectangle ScreenBounds { get; set; }
 
         public override string ToString() => Title;

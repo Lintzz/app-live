@@ -5,12 +5,12 @@ namespace RadminStreamApp.Models
 {
     public class Friend : System.ComponentModel.INotifyPropertyChanged
     {
-        private string _name;
-        private string _ip;
+        private string _name = string.Empty;
+        private string _ip = string.Empty;
         private bool _isOnline;
         private bool _isStreaming;
         private bool _isWatching;
-        private string _sessionInfo;
+        private string? _sessionInfo;
 
         public string Name
         {
@@ -48,7 +48,7 @@ namespace RadminStreamApp.Models
 
         /// <summary>Texto curto com o estado da sessão ativa (ex.: "42ms"), vazio quando não conectado.</summary>
         [JsonIgnore]
-        public string SessionInfo
+        public string? SessionInfo
         {
             get => _sessionInfo;
             set { _sessionInfo = value; OnPropertyChanged(nameof(SessionInfo)); OnPropertyChanged(nameof(SubtitleText)); }
@@ -64,9 +64,19 @@ namespace RadminStreamApp.Models
         public string StatusColor => IsOnline ? (IsStreaming ? "#00D26A" : "#FFBB00") : "#4A4A52";
 
         [JsonIgnore]
-        public string StatusTooltip => IsOnline
-            ? (IsStreaming ? "Em live agora" : "Online, mas sem transmitir")
-            : "Offline";
+        public string StatusTooltip => IsWatching
+            ? "Assistindo — clique para sair"
+            : IsOnline
+                ? (IsStreaming ? "Em live agora — clique para assistir" : "Online, mas sem transmitir")
+                : "Offline";
+
+        /// <summary>
+        /// Só dá para clicar no card quando há uma live para entrar (ou para sair de uma já
+        /// aberta). Antes o clique valia sempre e o app abria uma tentativa de conexão que
+        /// nunca ia dar em nada, com um card de "conectando" preso na tela.
+        /// </summary>
+        [JsonIgnore]
+        public bool CanWatch => IsWatching || (IsOnline && IsStreaming);
 
         /// <summary>Ordenação da sidebar: assistindo → em live → online → offline.</summary>
         [JsonIgnore]
@@ -77,9 +87,10 @@ namespace RadminStreamApp.Models
             OnPropertyChanged(nameof(StatusColor));
             OnPropertyChanged(nameof(StatusTooltip));
             OnPropertyChanged(nameof(SortRank));
+            OnPropertyChanged(nameof(CanWatch));
         }
 
-        public event System.ComponentModel.PropertyChangedEventHandler PropertyChanged;
+        public event System.ComponentModel.PropertyChangedEventHandler? PropertyChanged;
         protected void OnPropertyChanged(string propertyName) => PropertyChanged?.Invoke(this, new System.ComponentModel.PropertyChangedEventArgs(propertyName));
     }
 }

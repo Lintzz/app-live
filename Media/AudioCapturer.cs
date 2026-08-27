@@ -6,12 +6,19 @@ namespace RadminStreamApp
 {
     public class AudioCapturer : IAudioSource, IDisposable
     {
+        /// <summary>
+        /// 48 kHz é a taxa nativa do Opus, usado agora para mandar o áudio pela própria
+        /// trilha WebRTC. Antes eram 44,1 kHz porque o PCM cru ia direto pelo WebSocket.
+        /// </summary>
+        public const int SampleRate = 48000;
+        public const int Channels = 2;
+
         private WasapiLoopbackCapture _loopbackCapture;
         private BufferedWaveProvider _bufferedProvider;
         private MediaFoundationResampler _resampler;
         private byte[] _resampleBuffer;
         
-        private ProcessAudioCapturer _processAudioCapturer;
+        private ProcessAudioCapturer? _processAudioCapturer;
         private bool _useProcessCapture = false;
         private uint _targetProcessId = 0;
         
@@ -22,7 +29,7 @@ namespace RadminStreamApp
             _bufferedProvider = new BufferedWaveProvider(_loopbackCapture.WaveFormat);
             _bufferedProvider.DiscardOnBufferOverflow = true;
             
-            _resampler = new MediaFoundationResampler(_bufferedProvider, new WaveFormat(44100, 16, 2));
+            _resampler = new MediaFoundationResampler(_bufferedProvider, new WaveFormat(SampleRate, 16, Channels));
             _resampler.ResamplerQuality = 60;
             _resampleBuffer = new byte[8192];
 
@@ -56,7 +63,7 @@ namespace RadminStreamApp
         /// <summary>
         /// Fired when process audio capture encounters an error.
         /// </summary>
-        public event Action<string> OnCaptureError;
+        public event Action<string>? OnCaptureError;
 
         public System.Threading.Tasks.Task StartAudio()
         {
@@ -148,9 +155,12 @@ namespace RadminStreamApp
         public void SetAudioSourceFormat(AudioFormat audioFormat) { }
 
         public event EncodedSampleDelegate OnAudioSourceEncodedSample = delegate {};
+        // Exigido pelo IAudioSource a partir do SIPSorcery 8.0.12. Como o áudio é entregue
+        // manualmente ao WebRTC (e não por esta interface), o stub basta.
+        public event Action<EncodedAudioFrame> OnAudioSourceEncodedFrameReady = delegate {};
         public event RawAudioSampleDelegate OnAudioSourceRawSample = delegate {};
         public event SourceErrorDelegate OnAudioSourceError = delegate {};
-        public event Action<byte[]> OnAudioFrameReady;
+        public event Action<byte[]>? OnAudioFrameReady;
 
         public void Dispose()
         {

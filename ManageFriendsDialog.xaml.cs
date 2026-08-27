@@ -16,7 +16,7 @@ namespace RadminStreamApp
 
         public event Action<Friend> FriendAdded = delegate {};
 
-        public ManageFriendsDialog(ObservableCollection<Friend> friends, string suggestedIp = null)
+        public ManageFriendsDialog(ObservableCollection<Friend> friends, string? suggestedIp = null)
         {
             InitializeComponent();
 
@@ -33,7 +33,7 @@ namespace RadminStreamApp
             Loaded += (s, e) => TxtNewName.Focus();
         }
 
-        private void Friends_CollectionChanged(object sender, NotifyCollectionChangedEventArgs e) => UpdateEmptyState();
+        private void Friends_CollectionChanged(object? sender, NotifyCollectionChangedEventArgs e) => UpdateEmptyState();
 
         private void UpdateEmptyState()
         {
@@ -42,8 +42,8 @@ namespace RadminStreamApp
 
         private void BtnAdd_Click(object sender, RoutedEventArgs e)
         {
-            string ip = TxtNewIp.Text?.Trim();
-            string name = TxtNewName.Text?.Trim();
+            string ip = TxtNewIp.Text?.Trim() ?? string.Empty;
+            string name = TxtNewName.Text?.Trim() ?? string.Empty;
 
             if (string.IsNullOrWhiteSpace(ip))
             {
