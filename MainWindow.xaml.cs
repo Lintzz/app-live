@@ -58,6 +58,7 @@ namespace RadminStreamApp
 
         private readonly System.Windows.Threading.DispatcherTimer _mouseIdleTimer;
         private System.Windows.Threading.DispatcherTimer? _statusTimer;
+        private int _statusRefreshRunning;
 
         // Evita que sincronizar o estado visual dos toggles dispare os handlers de novo.
         private bool _syncingToggles;
@@ -213,10 +214,13 @@ namespace RadminStreamApp
 
         // ───────────────────────────── Status dos amigos ─────────────────────────────
 
+        /// <summary>De quanto em quanto tempo a bolinha de status de cada amigo é revalidada.</summary>
+        private static readonly TimeSpan StatusPollInterval = TimeSpan.FromSeconds(5);
+
         private void StartStatusTimer()
         {
             _statusTimer = new System.Windows.Threading.DispatcherTimer();
-            _statusTimer.Interval = TimeSpan.FromSeconds(30);
+            _statusTimer.Interval = StatusPollInterval;
             _statusTimer.Tick += async (s, ev) => await RefreshAllFriendsStatusAsync();
             _statusTimer.Start();
 
@@ -225,10 +229,21 @@ namespace RadminStreamApp
 
         private async System.Threading.Tasks.Task RefreshAllFriendsStatusAsync()
         {
-            // Em paralelo: cada checagem custa até 4s, então em série uma lista de 8+ amigos
-            // estourava o intervalo de 30s do timer e os ciclos se atropelavam.
-            await System.Threading.Tasks.Task.WhenAll(
-                _friends!.ToList().Select(CheckFriendStatusAsync));
+            // Um ciclo de cada vez: um amigo offline consome o timeout inteiro, e sem esta
+            // trava os ciclos se empilhariam no intervalo curto de atualização.
+            if (System.Threading.Interlocked.Exchange(ref _statusRefreshRunning, 1) != 0) return;
+
+            try
+            {
+                // Em paralelo: em série, uma lista de 8+ amigos offline levaria mais tempo
+                // que o próprio intervalo entre atualizações.
+                await System.Threading.Tasks.Task.WhenAll(
+                    _friends!.ToList().Select(CheckFriendStatusAsync));
+            }
+            finally
+            {
+                System.Threading.Interlocked.Exchange(ref _statusRefreshRunning, 0);
+            }
 
             _friendsView?.Refresh();
             UpdateSidebarEmptyStates();

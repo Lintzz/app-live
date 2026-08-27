@@ -24,6 +24,11 @@ namespace RadminStreamApp
         private StreamManager? _streamManager;
         private string _password = string.Empty;
         private string _authChallenge = string.Empty;
+
+        // O host responde AUTH_REQUIRED para CADA mensagem enviada antes de autenticar — o
+        // CLIENT_CONNECTED e um por candidato ICE. Sem esta trava, cada resposta abria um
+        // modal de senha e o usuário via a mesma caixa quatro vezes seguidas.
+        private bool _passwordPromptOpen;
         private bool _streamEnded;
         private bool _disposed;
 
@@ -105,26 +110,27 @@ namespace RadminStreamApp
                 var authMsg = SignalingMessage.Deserialize(message);
                 if (authMsg != null && authMsg.Type == "AUTH_REQUIRED")
                 {
-                    // O desafio muda a cada tentativa; guardamos o último para montar a prova.
                     _authChallenge = authMsg.Data ?? string.Empty;
 
-                    if (string.IsNullOrEmpty(_password))
+                    if (!string.IsNullOrEmpty(_password))
                     {
-                        StatusText = "Esta sala pede senha";
-                        RaiseOnUi(() => PasswordRequested?.Invoke(this, false));
+                        SendAuth();
                     }
                     else
                     {
-                        SendAuth();
+                        StatusText = "Esta sala pede senha";
+                        PromptForPassword(previousAttemptFailed: false);
                     }
                     return;
                 }
                 if (authMsg != null && authMsg.Type == "AUTH_FAIL")
                 {
+                    // O host manda o desafio seguinte junto da recusa, para a nova tentativa
+                    // já ter com o que responder.
+                    _authChallenge = authMsg.Data ?? string.Empty;
                     _password = string.Empty;
-                    _authChallenge = string.Empty;
                     StatusText = "Senha incorreta";
-                    RaiseOnUi(() => PasswordRequested?.Invoke(this, true));
+                    PromptForPassword(previousAttemptFailed: true);
                     return;
                 }
                 if (authMsg != null && authMsg.Type == "AUTH_OK")
@@ -195,9 +201,19 @@ namespace RadminStreamApp
             if (StatusText == "Conectando...") StatusText = "Conectado, aguardando vídeo...";
         }
 
+        /// <summary>Abre o modal de senha, no máximo um por vez.</summary>
+        private void PromptForPassword(bool previousAttemptFailed)
+        {
+            if (_passwordPromptOpen) return;
+            _passwordPromptOpen = true;
+
+            RaiseOnUi(() => PasswordRequested?.Invoke(this, previousAttemptFailed));
+        }
+
         /// <summary>Senha informada pelo usuário no modal.</summary>
         public void SubmitPassword(string password)
         {
+            _passwordPromptOpen = false;
             _password = password ?? string.Empty;
             SendAuth();
         }
@@ -205,6 +221,7 @@ namespace RadminStreamApp
         /// <summary>Usuário cancelou o modal de senha: encerra a sessão.</summary>
         public void CancelPassword()
         {
+            _passwordPromptOpen = false;
             StatusText = "Senha necessária";
             Disconnect();
         }

@@ -94,6 +94,12 @@ namespace RadminStreamApp
             if (!RestrictToAllowedIps) return true;
 
             var ip = NormalizeIp(rawIp);
+
+            // A própria máquina sempre passa, mesmo antes de SetAllowedIps ser chamado: é
+            // assim que o app consulta o próprio status, e evita que uma ordem de
+            // inicialização diferente tranque o usuário para fora de tudo.
+            if (ip == "127.0.0.1") return true;
+
             lock (_clientsLock)
             {
                 return _allowedIps.Contains(ip);
@@ -283,13 +289,23 @@ namespace RadminStreamApp
             Debug.WriteLine($"[Server] Started on ws://{ipAddress}:{port}");
         }
 
-        /// <summary>Manda AUTH_REQUIRED com um desafio novo para esta conexão.</summary>
-        private void SendChallenge(IWebSocketConnection socket)
+        /// <summary>
+        /// Manda AUTH_REQUIRED com o desafio pendente desta conexão, criando um se ainda não
+        /// houver. Reaproveitar é essencial: o viewer dispara várias mensagens antes de
+        /// autenticar (CLIENT_CONNECTED e cada candidato ICE), e cada uma passa por aqui.
+        /// Gerando um desafio novo a cada vez, a resposta do viewer chegava referente a um
+        /// desafio já substituído e virava "senha incorreta" sem motivo.
+        /// </summary>
+        private void SendChallenge(IWebSocketConnection socket, bool forceNew = false)
         {
-            var challenge = CryptoHelper.NewChallenge();
+            string challenge;
             lock (_clientsLock)
             {
-                _challenges[socket.ConnectionInfo.Id] = challenge;
+                if (forceNew || !_challenges.TryGetValue(socket.ConnectionInfo.Id, out challenge!) || string.IsNullOrEmpty(challenge))
+                {
+                    challenge = CryptoHelper.NewChallenge();
+                    _challenges[socket.ConnectionInfo.Id] = challenge;
+                }
             }
             socket.Send(SignalingMessage.Serialize(new SignalingMessage { Type = "AUTH_REQUIRED", Data = challenge }));
         }
@@ -324,9 +340,11 @@ namespace RadminStreamApp
             }
             else
             {
-                // Desafio queima a cada tentativa: impede replay do mesmo HMAC.
-                lock (_clientsLock) { _challenges.Remove(socket.ConnectionInfo.Id); }
-                socket.Send(SignalingMessage.Serialize(new SignalingMessage { Type = "AUTH_FAIL" }));
+                // Desafio queima a cada tentativa (impede replay do mesmo HMAC), e o novo vai
+                // junto do AUTH_FAIL — senão o viewer ficaria sem desafio para tentar de novo.
+                var next = CryptoHelper.NewChallenge();
+                lock (_clientsLock) { _challenges[socket.ConnectionInfo.Id] = next; }
+                socket.Send(SignalingMessage.Serialize(new SignalingMessage { Type = "AUTH_FAIL", Data = next }));
             }
         }
 

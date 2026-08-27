@@ -19,8 +19,11 @@ namespace RadminStreamApp.Services
     /// </summary>
     public static class FriendStatusService
     {
-        private static readonly TimeSpan ConnectTimeout = TimeSpan.FromSeconds(1);
-        private static readonly TimeSpan ResponseTimeout = TimeSpan.FromSeconds(2);
+        // Timeouts curtos de propósito: o alvo é a LAN virtual do Radmin, onde uma máquina
+        // que existe responde em milissegundos. O que custa caro é o amigo offline, e é ele
+        // que precisa caber dentro do intervalo de atualização.
+        private static readonly TimeSpan ConnectTimeout = TimeSpan.FromMilliseconds(800);
+        private static readonly TimeSpan ResponseTimeout = TimeSpan.FromMilliseconds(1200);
 
         public static async Task<FriendStatus> CheckAsync(string ip, int port = 8080)
         {
