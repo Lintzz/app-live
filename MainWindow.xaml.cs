@@ -35,6 +35,14 @@ namespace RadminStreamApp
             private set { if (_activeSession != value) { _activeSession = value; OnPropertyChanged(); } }
         }
 
+        private Visibility _tabsHeaderVisibility = Visibility.Visible;
+        /// <summary>Em teatro e tela cheia a barra de abas sai junto: fica so o video.</summary>
+        public Visibility TabsHeaderVisibility
+        {
+            get => _tabsHeaderVisibility;
+            private set { if (_tabsHeaderVisibility != value) { _tabsHeaderVisibility = value; OnPropertyChanged(); } }
+        }
+
         private bool _showStats;
         /// <summary>Liga o contador de fps/latência sobre cada live.</summary>
         public bool ShowStats
@@ -102,8 +110,11 @@ namespace RadminStreamApp
                 UpdateBanner.Visibility = Visibility.Visible;
             }
 
-            StartStatusTimer();
+            // O servidor precisa estar no ar antes do primeiro teste de status: senao um amigo
+            // apontando para esta maquina (ou o loopback) aparece offline ate o proximo ciclo.
             StartSignalingServer();
+            StartStatusTimer();
+            UpdatePlayerControlsState();
             UpdateScreenOverlapWarning();
 
             LocationChanged += (s2, e2) => UpdateScreenOverlapWarning();
@@ -195,20 +206,31 @@ namespace RadminStreamApp
                 var bytes = System.Text.Encoding.UTF8.GetBytes(SignalingMessage.Serialize(checkMsg));
                 await ws.SendAsync(new ArraySegment<byte>(bytes), System.Net.WebSockets.WebSocketMessageType.Text, true, System.Threading.CancellationToken.None);
 
-                var buffer = new byte[1024];
-                var receiveTask = ws.ReceiveAsync(new ArraySegment<byte>(buffer), System.Threading.CancellationToken.None);
-                if (await System.Threading.Tasks.Task.WhenAny(receiveTask, System.Threading.Tasks.Task.Delay(1000)) != receiveTask)
+                // Um host transmitindo manda áudio no mesmo socket; a resposta pode não vir de
+                // primeira, então lemos até achar o STATUS_RESPONSE (ou estourar o tempo).
+                var deadline = DateTime.UtcNow.AddSeconds(2);
+                var buffer = new byte[8192];
+                while (DateTime.UtcNow < deadline)
                 {
-                    Observe(receiveTask);
-                }
-                else
-                {
+                    var receiveTask = ws.ReceiveAsync(new ArraySegment<byte>(buffer), System.Threading.CancellationToken.None);
+                    var remaining = deadline - DateTime.UtcNow;
+                    if (remaining <= TimeSpan.Zero) { Observe(receiveTask); break; }
+
+                    if (await System.Threading.Tasks.Task.WhenAny(receiveTask, System.Threading.Tasks.Task.Delay(remaining)) != receiveTask)
+                    {
+                        Observe(receiveTask);
+                        break;
+                    }
+
                     var result = receiveTask.Result;
+                    if (result.MessageType != System.Net.WebSockets.WebSocketMessageType.Text) continue;
+
                     var responseText = System.Text.Encoding.UTF8.GetString(buffer, 0, result.Count);
                     var responseMsg = SignalingMessage.Deserialize(responseText);
                     if (responseMsg != null && responseMsg.Type == "STATUS_RESPONSE")
                     {
                         friend.IsStreaming = (responseMsg.Data == "STREAMING");
+                        break;
                     }
                 }
 
@@ -509,11 +531,9 @@ namespace RadminStreamApp
                 return;
             }
 
-            if (!friend.IsOnline)
-            {
-                ViewerEmptyText.Text = $"{friend.DisplayName} está offline";
-                return;
-            }
+            // O status pode estar velho (checagem a cada 30s): tenta conectar mesmo assim
+            // em vez de ignorar o clique, e revalida em paralelo.
+            if (!friend.IsOnline) _ = CheckFriendStatusAsync(friend);
 
             var session = new ViewerSession(friend);
             session.PasswordRequested += Session_PasswordRequested;
@@ -592,6 +612,12 @@ namespace RadminStreamApp
                 _activePip?.SetBitmap(ActiveSession.VideoBitmap);
             }
 
+            // Em abas o conteudo so aparece se a aba correspondente estiver selecionada.
+            if (ActiveSession != null && !ReferenceEquals(TabSessions.SelectedItem, ActiveSession))
+            {
+                TabSessions.SelectedItem = ActiveSession;
+            }
+
             UpdatePlayerControlsState();
         }
 
@@ -599,7 +625,7 @@ namespace RadminStreamApp
         private void UpdatePlayerControlsState()
         {
             bool hasSession = ActiveSession != null;
-            bool tabsMode = ToggleTabsView.IsChecked == true;
+            bool tabsMode = ToggleGridView.IsChecked != true;
             VolumeControls.Visibility = hasSession ? Visibility.Visible : Visibility.Collapsed;
 
             // Em abas já se vê uma live por vez; focar ali não significa nada.
@@ -652,26 +678,9 @@ namespace RadminStreamApp
             }
 
             // Com uma live só a sidebar sai da frente e volta quando o mouse encosta na borda esquerda.
-            // Com uma live só a sidebar sai da frente; a aba na borda esquerda a traz de volta.
-            bool collapsible = count >= 1;
-            if (collapsible)
-            {
-                SidebarColumn.Width = new GridLength(0);
-                System.Windows.Controls.Grid.SetColumnSpan(SidebarPanel, 2);
-                SidebarPanel.HorizontalAlignment = System.Windows.HorizontalAlignment.Left;
-                SidebarPanel.Width = 230;
-                SidebarHandle.Visibility = Visibility.Visible;
-                SetSidebarOpen(false);
-            }
-            else
-            {
-                SidebarColumn.Width = new GridLength(230);
-                System.Windows.Controls.Grid.SetColumnSpan(SidebarPanel, 1);
-                SidebarPanel.HorizontalAlignment = System.Windows.HorizontalAlignment.Stretch;
-                SidebarPanel.Width = double.NaN;
-                SidebarPanel.Visibility = Visibility.Visible;
-                SidebarHandle.Visibility = Visibility.Collapsed;
-            }
+            // Sem lives a lista fica aberta; com live ela recolhe e a aba a traz de volta,
+            // empurrando o vídeo em vez de cobrir.
+            SetSidebarOpen(count == 0);
         }
 
         private void SidebarHandle_Click(object sender, System.Windows.Input.MouseButtonEventArgs e)
@@ -684,9 +693,25 @@ namespace RadminStreamApp
         private void SetSidebarOpen(bool open)
         {
             SidebarPanel.Visibility = open ? Visibility.Visible : Visibility.Collapsed;
-            SidebarHandle.Margin = open ? new Thickness(215, 0, 0, 0) : new Thickness(-15, 0, 0, 0);
+            SidebarColumn.Width = open ? new GridLength(230) : new GridLength(0);
             SidebarHandleArrow.Text = open ? "\uE76B" : "\uE76C";
             SidebarHandle.ToolTip = open ? "Esconder amigos" : "Mostrar amigos";
+        }
+
+        /// <summary>Em teatro e tela cheia nada além do vídeo fica na tela.</summary>
+        private void SetSidebarChromeVisible(bool visible)
+        {
+            SidebarHandle.Visibility = visible ? Visibility.Visible : Visibility.Collapsed;
+            TabsHeaderVisibility = visible ? Visibility.Visible : Visibility.Collapsed;
+            if (!visible)
+            {
+                SidebarPanel.Visibility = Visibility.Collapsed;
+                SidebarColumn.Width = new GridLength(0);
+            }
+            else
+            {
+                SetSidebarOpen(_sessions.Count == 0);
+            }
         }
 
         private void StreamTab_OnCloseRequested(ViewerSession session) => CloseSession(session);
@@ -743,12 +768,21 @@ namespace RadminStreamApp
             if (TabSessions.SelectedItem is ViewerSession session) SetActiveSession(session);
         }
 
-        private void ToggleTabsView_Changed(object sender, RoutedEventArgs e)
+        private void TabClose_Click(object sender, RoutedEventArgs e)
         {
-            bool tabsMode = ToggleTabsView.IsChecked == true;
-            ToggleTabsView.ToolTip = tabsMode ? "Ver em grade" : "Ver em abas";
+            if (sender is System.Windows.Controls.Button button && button.DataContext is ViewerSession session)
+            {
+                CloseSession(session);
+            }
+        }
+
+        private void ToggleGridView_Changed(object sender, RoutedEventArgs e)
+        {
+            bool gridMode = ToggleGridView.IsChecked == true;
+            bool tabsMode = !gridMode;
+            ToggleGridView.ToolTip = gridMode ? "Ver em abas" : "Ver em grade";
             TabSessions.Visibility = tabsMode ? Visibility.Visible : Visibility.Collapsed;
-            GridSessions.Visibility = tabsMode ? Visibility.Collapsed : Visibility.Visible;
+            GridSessions.Visibility = gridMode ? Visibility.Visible : Visibility.Collapsed;
 
             if (tabsMode)
             {
@@ -856,6 +890,7 @@ namespace RadminStreamApp
             TopPanel.Visibility = Visibility.Collapsed;
             OverlayGrid.Visibility = Visibility.Visible;
             ApplyImmersiveMargins(true);
+            SetSidebarChromeVisible(false);
             SyncToggle(BtnFullscreen, true);
             SyncToggle(BtnTheater, false);
         }
@@ -867,6 +902,7 @@ namespace RadminStreamApp
             TopPanel.Visibility = Visibility.Collapsed;
             OverlayGrid.Visibility = Visibility.Visible;
             ApplyImmersiveMargins(true);
+            SetSidebarChromeVisible(false);
             SyncToggle(BtnTheater, true);
             SyncToggle(BtnFullscreen, false);
         }
@@ -890,6 +926,7 @@ namespace RadminStreamApp
             TopPanel.Visibility = Visibility.Visible;
             OverlayGrid.Visibility = Visibility.Collapsed;
             ApplyImmersiveMargins(false);
+            SetSidebarChromeVisible(true);
             SyncToggle(BtnTheater, false);
             SyncToggle(BtnFullscreen, false);
         }
@@ -897,7 +934,6 @@ namespace RadminStreamApp
         private void ApplyImmersiveMargins(bool immersive)
         {
             ViewerArea.Margin = immersive ? new Thickness(0) : new Thickness(15, 0, 15, 15);
-            VideoControlsBar.Margin = immersive ? new Thickness(0) : new Thickness(15, 0, 15, 15);
             VideoControlsGradient.CornerRadius = immersive ? new CornerRadius(0) : new CornerRadius(0, 0, 12, 12);
         }
 
@@ -925,7 +961,7 @@ namespace RadminStreamApp
             _mouseIdleTimer.Stop();
             _mouseIdleTimer.Start();
 
-            if (ViewerArea.IsMouseOver || VideoControlsButtons.IsMouseOver)
+            if (ViewerArea.IsMouseOver || VideoControlsButtons.IsMouseOver || SidebarHandle.IsMouseOver)
             {
                 ShowVideoControls();
             }
@@ -935,8 +971,8 @@ namespace RadminStreamApp
         {
             _mouseIdleTimer.Stop();
 
-            // Enquanto o mouse estiver na própria barra ela não some.
-            if (VideoControlsButtons.IsMouseOver)
+            // Enquanto o mouse estiver na barra ou no botão de amigos, nada some.
+            if (VideoControlsButtons.IsMouseOver || SidebarHandle.IsMouseOver)
             {
                 _mouseIdleTimer.Start();
                 return;
@@ -954,12 +990,21 @@ namespace RadminStreamApp
         {
             if (Math.Abs(VideoControlsBar.Opacity - target) < 0.01 && VideoControlsBar.IsHitTestVisible == interactive) return;
 
-            VideoControlsBar.IsHitTestVisible = interactive;
-            VideoControlsBar.BeginAnimation(OpacityProperty, new System.Windows.Media.Animation.DoubleAnimation
+            var fade = new System.Windows.Media.Animation.DoubleAnimation
             {
                 To = target,
                 Duration = TimeSpan.FromMilliseconds(160)
-            });
+            };
+
+            VideoControlsBar.IsHitTestVisible = interactive;
+            VideoControlsBar.BeginAnimation(OpacityProperty, fade);
+
+            // O botão da lista de amigos vive sobre o vídeo e aparece junto com o resto.
+            if (SidebarHandle.Visibility == Visibility.Visible)
+            {
+                SidebarHandle.IsHitTestVisible = interactive;
+                SidebarHandle.BeginAnimation(OpacityProperty, fade);
+            }
         }
 
         private void BtnUpdate_Click(object sender, RoutedEventArgs e)

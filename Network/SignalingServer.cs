@@ -13,6 +13,11 @@ namespace RadminStreamApp
         private readonly object _clientsLock = new object();
         private HashSet<Guid> _authenticatedClients = new HashSet<Guid>();
 
+        // Só entra aqui quem mandou CLIENT_CONNECTED, ou seja, quem realmente veio assistir.
+        // Conexões passageiras (o teste de status dos amigos) ficam de fora do broadcast
+        // e da contagem — senão recebem áudio binário no lugar do STATUS_RESPONSE.
+        private HashSet<Guid> _viewers = new HashSet<Guid>();
+
         public bool IsStreaming { get; set; } = false;
         public string RoomPassword { get; set; } = string.Empty;
 
@@ -29,7 +34,7 @@ namespace RadminStreamApp
             {
                 lock (_clientsLock)
                 {
-                    return _clients.Count;
+                    return _viewers.Count;
                 }
             }
         }
@@ -42,6 +47,7 @@ namespace RadminStreamApp
                 lock (_clientsLock)
                 {
                     return _clients
+                        .Where(c => _viewers.Contains(c.ConnectionInfo.Id))
                         .Select(c => NormalizeIp(c.ConnectionInfo.ClientIpAddress))
                         .ToList()
                         .AsReadOnly();
@@ -118,7 +124,6 @@ namespace RadminStreamApp
                     {
                         _clients.Add(socket);
                     }
-                    OnClientConnected?.Invoke(socket);
                 };
 
                 socket.OnClose = () =>
@@ -128,6 +133,7 @@ namespace RadminStreamApp
                     {
                         _clients.Remove(socket);
                         _authenticatedClients.Remove(socket.ConnectionInfo.Id);
+                        _viewers.Remove(socket.ConnectionInfo.Id);
                     }
                     OnClientDisconnected?.Invoke(socket);
                 };
@@ -187,15 +193,20 @@ namespace RadminStreamApp
                         if (decrypted != null) plainMessage = decrypted;
                     }
 
-                    if (!ReferenceEquals(plainMessage, message))
+                    var effectiveMsg = ReferenceEquals(plainMessage, message)
+                        ? msgObj
+                        : SignalingMessage.Deserialize(plainMessage);
+
+                    if (effectiveMsg != null)
                     {
-                        var innerMsg = SignalingMessage.Deserialize(plainMessage);
-                        if (innerMsg != null && innerMsg.Type == "STATUS_CHECK")
+                        if (effectiveMsg.Type == "STATUS_CHECK")
                         {
                             var innerResponse = new SignalingMessage { Type = "STATUS_RESPONSE", Data = IsStreaming ? "STREAMING" : "IDLE" };
                             socket.Send(SignalingMessage.Serialize(innerResponse));
                             return;
                         }
+
+                        if (effectiveMsg.Type == "CLIENT_CONNECTED") RegisterViewer(socket);
                     }
 
                     OnMessageReceived?.Invoke(socket, plainMessage);
@@ -222,6 +233,18 @@ namespace RadminStreamApp
             Debug.WriteLine($"[Server] Started on ws://{ipAddress}:{port}");
         }
 
+        /// <summary>Marca a conexão como viewer de verdade e avisa a UI uma única vez.</summary>
+        private void RegisterViewer(IWebSocketConnection socket)
+        {
+            bool isNew;
+            lock (_clientsLock)
+            {
+                isNew = _viewers.Add(socket.ConnectionInfo.Id);
+            }
+
+            if (isNew) OnClientConnected?.Invoke(socket);
+        }
+
         public void SendMessage(IWebSocketConnection client, string message)
         {
             client.Send(message);
@@ -246,10 +269,9 @@ namespace RadminStreamApp
             List<IWebSocketConnection> clientsCopy;
             lock (_clientsLock)
             {
-                if (string.IsNullOrEmpty(RoomPassword))
-                    clientsCopy = _clients.ToList();
-                else
-                    clientsCopy = _clients.Where(c => _authenticatedClients.Contains(c.ConnectionInfo.Id)).ToList();
+                clientsCopy = _clients.Where(c => _viewers.Contains(c.ConnectionInfo.Id)).ToList();
+                if (!string.IsNullOrEmpty(RoomPassword))
+                    clientsCopy = clientsCopy.Where(c => _authenticatedClients.Contains(c.ConnectionInfo.Id)).ToList();
             }
             var key = EncryptionKey;
             var payload = key != null ? CryptoHelper.EncryptBytes(data, key) : data;
@@ -264,10 +286,9 @@ namespace RadminStreamApp
             List<IWebSocketConnection> clientsCopy;
             lock (_clientsLock)
             {
-                if (string.IsNullOrEmpty(RoomPassword))
-                    clientsCopy = _clients.ToList();
-                else
-                    clientsCopy = _clients.Where(c => _authenticatedClients.Contains(c.ConnectionInfo.Id)).ToList();
+                clientsCopy = _clients.Where(c => _viewers.Contains(c.ConnectionInfo.Id)).ToList();
+                if (!string.IsNullOrEmpty(RoomPassword))
+                    clientsCopy = clientsCopy.Where(c => _authenticatedClients.Contains(c.ConnectionInfo.Id)).ToList();
             }
             var key = EncryptionKey;
             var payload = key != null ? CryptoHelper.EncryptText(message, key) : message;
