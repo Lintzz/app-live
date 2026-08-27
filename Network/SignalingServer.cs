@@ -34,6 +34,42 @@ namespace RadminStreamApp
             }
         }
 
+        /// <summary>IPs dos viewers conectados, normalizados (IPv4 puro quando possível).</summary>
+        public IReadOnlyList<string> ConnectedClientIps
+        {
+            get
+            {
+                lock (_clientsLock)
+                {
+                    return _clients
+                        .Select(c => NormalizeIp(c.ConnectionInfo.ClientIpAddress))
+                        .ToList()
+                        .AsReadOnly();
+                }
+            }
+        }
+
+        /// <summary>
+        /// O Fleck entrega IPv4 mapeado em IPv6 ("::ffff:26.10.0.5") e loopback como "::1".
+        /// Sem normalizar, o IP nunca casa com o que o usuário salvou na lista de amigos.
+        /// </summary>
+        public static string NormalizeIp(string ip)
+        {
+            if (string.IsNullOrWhiteSpace(ip)) return string.Empty;
+
+            ip = ip.Trim();
+            if (ip == "::1") return "127.0.0.1";
+
+            const string v4MappedPrefix = "::ffff:";
+            if (ip.StartsWith(v4MappedPrefix, StringComparison.OrdinalIgnoreCase))
+            {
+                var candidate = ip.Substring(v4MappedPrefix.Length);
+                if (candidate.Contains('.')) return candidate;
+            }
+
+            return ip;
+        }
+
         public IReadOnlyList<IWebSocketConnection> Clients
         {
             get

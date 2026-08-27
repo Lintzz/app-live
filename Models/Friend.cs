@@ -1,4 +1,5 @@
 using System;
+using System.Text.Json.Serialization;
 
 namespace RadminStreamApp.Models
 {
@@ -8,32 +9,75 @@ namespace RadminStreamApp.Models
         private string _ip;
         private bool _isOnline;
         private bool _isStreaming;
+        private bool _isWatching;
+        private string _sessionInfo;
 
         public string Name
         {
             get => _name;
-            set { _name = value; OnPropertyChanged(nameof(Name)); }
+            set { _name = value; OnPropertyChanged(nameof(Name)); OnPropertyChanged(nameof(DisplayName)); }
         }
 
         public string Ip
         {
             get => _ip;
-            set { _ip = value; OnPropertyChanged(nameof(Ip)); }
+            set { _ip = value; OnPropertyChanged(nameof(Ip)); OnPropertyChanged(nameof(DisplayName)); }
         }
 
+        [JsonIgnore]
         public bool IsOnline
         {
             get => _isOnline;
-            set { _isOnline = value; OnPropertyChanged(nameof(IsOnline)); OnPropertyChanged(nameof(StatusColor)); }
+            set { _isOnline = value; OnPropertyChanged(nameof(IsOnline)); RaiseStatusChanged(); }
         }
 
+        [JsonIgnore]
         public bool IsStreaming
         {
             get => _isStreaming;
-            set { _isStreaming = value; OnPropertyChanged(nameof(IsStreaming)); OnPropertyChanged(nameof(StatusColor)); }
+            set { _isStreaming = value; OnPropertyChanged(nameof(IsStreaming)); RaiseStatusChanged(); }
         }
 
-        public string StatusColor => IsOnline ? (IsStreaming ? "#00FF00" : "#FFBB00") : "#555555";
+        /// <summary>True enquanto existe uma ViewerSession conectada a este amigo.</summary>
+        [JsonIgnore]
+        public bool IsWatching
+        {
+            get => _isWatching;
+            set { _isWatching = value; OnPropertyChanged(nameof(IsWatching)); RaiseStatusChanged(); }
+        }
+
+        /// <summary>Texto curto com o estado da sessão ativa (ex.: "42ms"), vazio quando não conectado.</summary>
+        [JsonIgnore]
+        public string SessionInfo
+        {
+            get => _sessionInfo;
+            set { _sessionInfo = value; OnPropertyChanged(nameof(SessionInfo)); OnPropertyChanged(nameof(SubtitleText)); }
+        }
+
+        [JsonIgnore]
+        public string DisplayName => string.IsNullOrWhiteSpace(Name) ? Ip : Name;
+
+        [JsonIgnore]
+        public string SubtitleText => string.IsNullOrWhiteSpace(SessionInfo) ? Ip : $"{Ip} · {SessionInfo}";
+
+        [JsonIgnore]
+        public string StatusColor => IsOnline ? (IsStreaming ? "#00D26A" : "#FFBB00") : "#4A4A52";
+
+        [JsonIgnore]
+        public string StatusTooltip => IsOnline
+            ? (IsStreaming ? "Em live agora" : "Online, mas sem transmitir")
+            : "Offline";
+
+        /// <summary>Ordenação da sidebar: assistindo → em live → online → offline.</summary>
+        [JsonIgnore]
+        public int SortRank => IsWatching ? 0 : (IsStreaming ? 1 : (IsOnline ? 2 : 3));
+
+        private void RaiseStatusChanged()
+        {
+            OnPropertyChanged(nameof(StatusColor));
+            OnPropertyChanged(nameof(StatusTooltip));
+            OnPropertyChanged(nameof(SortRank));
+        }
 
         public event System.ComponentModel.PropertyChangedEventHandler PropertyChanged;
         protected void OnPropertyChanged(string propertyName) => PropertyChanged?.Invoke(this, new System.ComponentModel.PropertyChangedEventArgs(propertyName));

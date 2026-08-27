@@ -6,6 +6,8 @@ namespace RadminStreamApp
     public partial class StreamTab : System.Windows.Controls.UserControl
     {
         public event Action<ViewerSession> OnCloseRequested = delegate {};
+        public event Action<ViewerSession> OnActivated = delegate {};
+        public event Action<ViewerSession> OnFullscreenRequested = delegate {};
 
         public StreamTab()
         {
@@ -14,17 +16,24 @@ namespace RadminStreamApp
 
         private ViewerSession Session => DataContext as ViewerSession;
 
-        private void SliderTabVolume_ValueChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
+        private void Root_MouseLeftButtonDown(object sender, System.Windows.Input.MouseButtonEventArgs e)
         {
-            Session?.SetVolume((float)(e.NewValue / 100.0));
+            if (Session == null) return;
+
+            OnActivated?.Invoke(Session);
+            if (e.ClickCount == 2) OnFullscreenRequested?.Invoke(Session);
+        }
+
+        private void BtnMute_Click(object sender, RoutedEventArgs e)
+        {
+            if (Session == null) return;
+            OnActivated?.Invoke(Session);
+            Session.ToggleMute();
         }
 
         private void BtnClose_Click(object sender, RoutedEventArgs e)
         {
-            if (Session != null)
-            {
-                OnCloseRequested?.Invoke(Session);
-            }
+            if (Session != null) OnCloseRequested?.Invoke(Session);
         }
     }
 }

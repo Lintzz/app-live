@@ -166,6 +166,23 @@ namespace RadminStreamApp
             }
         }
 
+        /// <summary>
+        /// Impede novas tentativas de reconexão. Usado quando o host encerra a live de propósito:
+        /// sem isso o viewer fica 10 tentativas tentando voltar para uma stream que acabou.
+        /// </summary>
+        public void SuppressReconnect()
+        {
+            _intentionalStop = true;
+            _reconnectCts?.Cancel();
+        }
+
+        /// <summary>Reabilita a reconexão automática (host voltou a transmitir).</summary>
+        public void AllowReconnect()
+        {
+            _intentionalStop = false;
+            _reconnectAttempts = 0;
+        }
+
         public void SendMessage(string message)
         {
             if (_client == null || !_client.IsRunning) return;

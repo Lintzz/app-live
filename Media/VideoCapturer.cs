@@ -71,23 +71,6 @@ namespace RadminStreamApp
 
         private const Int32 CURSOR_SHOWING = 0x00000001;
 
-        [DllImport("user32.dll")]
-        private static extern bool GetWindowRect(IntPtr hWnd, out RECT lpRect);
-
-        [StructLayout(LayoutKind.Sequential)]
-        public struct RECT
-        {
-            public int Left;
-            public int Top;
-            public int Right;
-            public int Bottom;
-        }
-
-        [DllImport("user32.dll")]
-        public static extern bool PrintWindow(IntPtr hwnd, IntPtr hdcBlt, uint nFlags);
-
-        private const uint PW_RENDERFULLCONTENT = 2;
-
         public void SetTargetSource(CaptureSource source)
         {
             _captureSource = source;
@@ -124,7 +107,6 @@ namespace RadminStreamApp
         private void CaptureFrame(object state)
         {
             if (!_isCapturing || _captureSource == null) return;
-            if (!_captureSource.IsScreen && _captureSource.Hwnd == IntPtr.Zero) return;
 
             if (System.Threading.Interlocked.CompareExchange(ref _isCapturingFrame, 1, 0) != 0)
             {
@@ -133,23 +115,10 @@ namespace RadminStreamApp
 
             try
             {
-                int left = 0, top = 0, width = 0, height = 0;
-
-                if (_captureSource.IsScreen)
-                {
-                    left = _captureSource.ScreenBounds.Left;
-                    top = _captureSource.ScreenBounds.Top;
-                    width = _captureSource.ScreenBounds.Width;
-                    height = _captureSource.ScreenBounds.Height;
-                }
-                else
-                {
-                    GetWindowRect(_captureSource.Hwnd, out RECT rect);
-                    left = rect.Left;
-                    top = rect.Top;
-                    width = rect.Right - rect.Left;
-                    height = rect.Bottom - rect.Top;
-                }
+                int left = _captureSource.ScreenBounds.Left;
+                int top = _captureSource.ScreenBounds.Top;
+                int width = _captureSource.ScreenBounds.Width;
+                int height = _captureSource.ScreenBounds.Height;
 
                 if (width <= 0 || height <= 0) return;
 
@@ -176,17 +145,7 @@ namespace RadminStreamApp
                 {
                     using (var gFull = Graphics.FromImage(fullBmp))
                     {
-                        if (_captureSource.IsScreen)
-                        {
-                            gFull.CopyFromScreen(left, top, 0, 0, new Size(width, height), CopyPixelOperation.SourceCopy);
-                        }
-                        else
-                        {
-                            gFull.Clear(Color.Black);
-                            IntPtr hdc = gFull.GetHdc();
-                            try { PrintWindow(_captureSource.Hwnd, hdc, PW_RENDERFULLCONTENT); }
-                            finally { gFull.ReleaseHdc(hdc); }
-                        }
+                        gFull.CopyFromScreen(left, top, 0, 0, new Size(width, height), CopyPixelOperation.SourceCopy);
 
                         // Draw mouse cursor
                         CURSORINFO pci;

@@ -1,51 +1,74 @@
 using System;
+using System.Collections.ObjectModel;
+using System.Collections.Specialized;
+using System.ComponentModel;
 using System.Diagnostics;
+using System.Linq;
+using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
 using System.Windows;
+using System.Windows.Data;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
-using System.Runtime.InteropServices;
-using System.Collections.ObjectModel;
-using System.Linq;
 using RadminStreamApp.Models;
 using RadminStreamApp.Services;
 
 namespace RadminStreamApp
 {
-    public partial class MainWindow : Window
+    public partial class MainWindow : Window, INotifyPropertyChanged
     {
         private SignalingServer _server;
-        private SignalingClient _client;
-        private StreamManager _streamManager;
-        private WriteableBitmap _writeableBitmap;
+        private StreamManager _hostStreamManager;
+        private WriteableBitmap _hostBitmap;
+
+        private ObservableCollection<Friend> _friends;
+        private ICollectionView _friendsView;
+        private readonly ObservableCollection<ViewerSession> _sessions = new ObservableCollection<ViewerSession>();
+        private ViewerSession _activeSession;
+
+        private PipWindow _activePip;
+        private string _lastRoomPassword = string.Empty;
+        private string _downloadUrl;
+
         private System.Windows.Threading.DispatcherTimer _mouseIdleTimer;
         private System.Windows.Threading.DispatcherTimer _statusTimer;
 
-        private string _downloadUrl;
-        private ObservableCollection<Friend> _friends;
-        private int _lastViewerFps = 0;
-        private int _lastLatencyMs = 0;
-        private PipWindow _activePip;
-        private ObservableCollection<ViewerSession> _watchPartySessions = new ObservableCollection<ViewerSession>();
-        private bool _showingSourceChangedMessage = false;
+        private int _gridColumns = 1;
+        /// <summary>Colunas da grade de lives — 1 live ocupa tudo, 2 lado a lado, 3-4 em 2x2, 5+ em 3 colunas.</summary>
+        public int GridColumns
+        {
+            get => _gridColumns;
+            private set { if (_gridColumns != value) { _gridColumns = value; OnPropertyChanged(); } }
+        }
 
         public MainWindow()
         {
             InitializeComponent();
-            
+            DataContext = this;
+
             _mouseIdleTimer = new System.Windows.Threading.DispatcherTimer();
             _mouseIdleTimer.Interval = TimeSpan.FromSeconds(3);
             _mouseIdleTimer.Tick += MouseIdleTimer_Tick;
             this.MouseMove += MainWindow_MouseMove;
             this.Loaded += MainWindow_Loaded;
+
+            _sessions.CollectionChanged += Sessions_CollectionChanged;
         }
 
         private async void MainWindow_Loaded(object sender, RoutedEventArgs e)
         {
             _friends = new ObservableCollection<Friend>(FriendsService.LoadFriends());
-            CboFriends.ItemsSource = _friends;
-            LstWatchPartyFriends.ItemsSource = _friends;
-            TabWatchParty.ItemsSource = _watchPartySessions;
-            GridWatchParty.ItemsSource = _watchPartySessions;
+
+            _friendsView = CollectionViewSource.GetDefaultView(_friends);
+            _friendsView.SortDescriptions.Add(new SortDescription(nameof(Friend.SortRank), ListSortDirection.Ascending));
+            _friendsView.SortDescriptions.Add(new SortDescription(nameof(Friend.Name), ListSortDirection.Ascending));
+
+            LstFriendsSidebar.ItemsSource = _friendsView;
+            GridSessions.ItemsSource = _sessions;
+            TabSessions.ItemsSource = _sessions;
+
+            _friends.CollectionChanged += (s, ev) => UpdateSidebarEmptyStates();
+            UpdateSidebarEmptyStates();
 
             var updateResult = await UpdateManager.CheckForUpdatesAsync();
             if (updateResult.HasUpdate)
@@ -58,22 +81,27 @@ namespace RadminStreamApp
             StartStatusTimer();
         }
 
+        // ───────────────────────────── Status dos amigos ─────────────────────────────
+
         private void StartStatusTimer()
         {
             _statusTimer = new System.Windows.Threading.DispatcherTimer();
-            _statusTimer.Interval = TimeSpan.FromSeconds(10);
-            _statusTimer.Tick += async (s, ev) => {
-                foreach (var friend in _friends.ToList())
-                {
-                    await CheckFriendStatusAsync(friend);
-                }
-            };
+            _statusTimer.Interval = TimeSpan.FromSeconds(30);
+            _statusTimer.Tick += async (s, ev) => await RefreshAllFriendsStatusAsync();
             _statusTimer.Start();
-            
+
+            _ = RefreshAllFriendsStatusAsync();
+        }
+
+        private async System.Threading.Tasks.Task RefreshAllFriendsStatusAsync()
+        {
             foreach (var friend in _friends.ToList())
             {
-                _ = CheckFriendStatusAsync(friend);
+                await CheckFriendStatusAsync(friend);
             }
+
+            _friendsView?.Refresh();
+            UpdateSidebarEmptyStates();
         }
 
         private async System.Threading.Tasks.Task CheckFriendStatusAsync(Friend friend)
@@ -88,9 +116,9 @@ namespace RadminStreamApp
                     friend.IsStreaming = false;
                     return;
                 }
-                
+
                 friend.IsOnline = true;
-                
+
                 using var ws = new System.Net.WebSockets.ClientWebSocket();
                 var wsConnectTask = ws.ConnectAsync(new Uri($"ws://{friend.Ip}:8080"), System.Threading.CancellationToken.None);
                 if (await System.Threading.Tasks.Task.WhenAny(wsConnectTask, System.Threading.Tasks.Task.Delay(1000)) != wsConnectTask)
@@ -98,11 +126,11 @@ namespace RadminStreamApp
                     friend.IsStreaming = false;
                     return;
                 }
-                
+
                 var checkMsg = new SignalingMessage { Type = "STATUS_CHECK" };
-                var bytes = System.Text.Encoding.UTF8.GetBytes(System.Text.Json.JsonSerializer.Serialize(checkMsg));
+                var bytes = System.Text.Encoding.UTF8.GetBytes(SignalingMessage.Serialize(checkMsg));
                 await ws.SendAsync(new ArraySegment<byte>(bytes), System.Net.WebSockets.WebSocketMessageType.Text, true, System.Threading.CancellationToken.None);
-                
+
                 var buffer = new byte[1024];
                 var receiveTask = ws.ReceiveAsync(new ArraySegment<byte>(buffer), System.Threading.CancellationToken.None);
                 if (await System.Threading.Tasks.Task.WhenAny(receiveTask, System.Threading.Tasks.Task.Delay(1000)) == receiveTask)
@@ -115,7 +143,7 @@ namespace RadminStreamApp
                         friend.IsStreaming = (responseMsg.Data == "STREAMING");
                     }
                 }
-                
+
                 try { await ws.CloseAsync(System.Net.WebSockets.WebSocketCloseStatus.NormalClosure, "", System.Threading.CancellationToken.None); } catch { }
             }
             catch
@@ -125,509 +153,208 @@ namespace RadminStreamApp
             }
         }
 
-        private async void BtnUpdate_Click(object sender, RoutedEventArgs e)
+        private void UpdateSidebarEmptyStates()
         {
-            if (!string.IsNullOrEmpty(_downloadUrl))
-            {
-                BtnUpdate.Content = "Baixando...";
-                BtnUpdate.IsEnabled = false;
-                BtnDismissUpdate.IsEnabled = false;
-                await UpdateManager.DownloadAndInstallUpdateAsync(_downloadUrl);
-            }
+            bool hasFriends = _friends != null && _friends.Count > 0;
+            SidebarEmptyState.Visibility = hasFriends ? Visibility.Collapsed : Visibility.Visible;
+
+            bool anyOnline = hasFriends && _friends.Any(f => f.IsOnline);
+            SidebarNoneOnline.Visibility = (hasFriends && !anyOnline) ? Visibility.Visible : Visibility.Collapsed;
         }
 
-        private void BtnDismissUpdate_Click(object sender, RoutedEventArgs e)
-        {
-            UpdateBanner.Visibility = Visibility.Collapsed;
-        }
-
-        private void CboWindows_DropDownOpened(object sender, EventArgs e)
-        {
-            CboWindows.ItemsSource = WindowHelper.GetCapturableWindows();
-        }
-
-        private void CboWindows_SelectionChanged(object sender, System.Windows.Controls.SelectionChangedEventArgs e)
-        {
-            if (_streamManager != null && BtnStopStream.IsEnabled && CboWindows.SelectedItem is CaptureSource selectedSource)
-            {
-                _streamManager.SetTargetSource(selectedSource);
-                _streamManager.ForceKeyFrame();
-                _server?.BroadcastMessage("SOURCE_CHANGED");
-            }
-        }
-
-        private void SliderVolume_ValueChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
-        {
-            if (_streamManager != null)
-            {
-                _streamManager.SetVolume((float)e.NewValue / 100f);
-            }
-        }
+        // ───────────────────────────── Modos ─────────────────────────────
 
         private void BtnHost_Click(object sender, RoutedEventArgs e)
         {
-            BtnClient.Visibility = Visibility.Visible;
-            BtnClient.IsEnabled = true;
-            BtnWatchParty.IsEnabled = true;
             BtnHost.IsEnabled = false;
+            BtnViewer.IsEnabled = true;
 
             PanelHost.Visibility = Visibility.Visible;
-            PanelClient.Visibility = Visibility.Collapsed;
-            PanelWatchParty.Visibility = Visibility.Collapsed;
-            WatchPartyArea.Visibility = Visibility.Collapsed;
+            PanelViewer.Visibility = Visibility.Collapsed;
             VideoBorder.Visibility = Visibility.Visible;
+            ViewerArea.Visibility = Visibility.Collapsed;
 
-            IconVolume.Visibility = Visibility.Collapsed;
-            SliderVolume.Visibility = Visibility.Collapsed;
-            BtnSettings.Visibility = Visibility.Collapsed;
-            BtnPip.Visibility = Visibility.Collapsed;
-            BtnTheater.Visibility = Visibility.Collapsed;
-            BtnFullscreen.Visibility = Visibility.Collapsed;
-
-            CboWindows.ItemsSource = WindowHelper.GetCapturableWindows();
+            LoadScreens();
 
             if (_server == null)
             {
                 _server = new SignalingServer();
                 _server.OnMessageReceived += Server_OnMessageReceived;
                 _server.OnClientConnected += (socket) => {
-                    System.Windows.Application.Current.Dispatcher.Invoke(() => {
-                        UpdateViewerCount();
-                    });
+                    System.Windows.Application.Current.Dispatcher.Invoke(UpdateViewerCount);
                 };
                 _server.OnClientDisconnected += (socket) => {
-                    _streamManager?.RemoveClient(socket.ConnectionInfo.Id.ToString());
-                    System.Windows.Application.Current.Dispatcher.Invoke(() => {
-                        UpdateViewerCount();
-                    });
+                    _hostStreamManager?.RemoveClient(socket.ConnectionInfo.Id.ToString());
+                    System.Windows.Application.Current.Dispatcher.Invoke(UpdateViewerCount);
                 };
                 _server.Start("0.0.0.0", 8080);
                 UpdateViewerCount();
             }
         }
 
-        private void UpdateViewerCount()
+        private void BtnViewer_Click(object sender, RoutedEventArgs e)
         {
-            if (_server != null)
+            BtnViewer.IsEnabled = false;
+            BtnHost.IsEnabled = true;
+
+            PanelHost.Visibility = Visibility.Collapsed;
+            PanelViewer.Visibility = Visibility.Visible;
+            VideoBorder.Visibility = Visibility.Collapsed;
+            ViewerArea.Visibility = Visibility.Visible;
+
+            UpdateSidebarEmptyStates();
+            UpdateViewerLayout();
+        }
+
+        // ───────────────────────────── Host ─────────────────────────────
+
+        private void LoadScreens()
+        {
+            var screens = WindowHelper.GetCapturableScreens();
+            CboWindows.ItemsSource = screens;
+
+            // Sem isso o campo abre em branco e o usuário precisa abrir o dropdown para conseguir dar Start.
+            if (CboWindows.SelectedItem == null && screens.Count > 0)
             {
-                int count = _server.ConnectedClientsCount;
-                ViewerCountText.Text = $"{count} Viewer{(count != 1 ? "s" : "")}";
+                CboWindows.SelectedIndex = 0;
+            }
+        }
+
+        private void CboWindows_DropDownOpened(object sender, EventArgs e)
+        {
+            var previous = CboWindows.SelectedItem as CaptureSource;
+            var screens = WindowHelper.GetCapturableScreens();
+            CboWindows.ItemsSource = screens;
+
+            if (previous != null)
+            {
+                var match = screens.FirstOrDefault(s => s.Title == previous.Title);
+                if (match != null) CboWindows.SelectedItem = match;
+            }
+
+            if (CboWindows.SelectedItem == null && screens.Count > 0)
+            {
+                CboWindows.SelectedIndex = 0;
+            }
+        }
+
+        private void CboWindows_SelectionChanged(object sender, System.Windows.Controls.SelectionChangedEventArgs e)
+        {
+            if (_hostStreamManager != null && BtnStopStream.IsEnabled && CboWindows.SelectedItem is CaptureSource selectedSource)
+            {
+                _hostStreamManager.SetTargetSource(selectedSource);
+                _hostStreamManager.ForceKeyFrame();
+                _server?.BroadcastMessage("SOURCE_CHANGED");
             }
         }
 
         private async void Server_OnMessageReceived(Fleck.IWebSocketConnection socket, string message)
         {
-            if (_streamManager != null)
-                await _streamManager.HandleSignalingMessage(socket.ConnectionInfo.Id.ToString(), message);
+            if (_hostStreamManager != null)
+                await _hostStreamManager.HandleSignalingMessage(socket.ConnectionInfo.Id.ToString(), message);
         }
 
-        private void BtnClient_Click(object sender, RoutedEventArgs e)
+        private void UpdateViewerCount()
         {
-            BtnHost.Visibility = Visibility.Visible;
-            BtnHost.IsEnabled = true;
-            BtnWatchParty.IsEnabled = true;
-            BtnClient.IsEnabled = false;
+            if (_server == null) return;
 
-            PanelHost.Visibility = Visibility.Collapsed;
-            PanelClient.Visibility = Visibility.Visible;
-            PanelWatchParty.Visibility = Visibility.Collapsed;
-            WatchPartyArea.Visibility = Visibility.Collapsed;
-            VideoBorder.Visibility = Visibility.Visible;
+            var ips = _server.ConnectedClientIps;
+            int count = ips.Count;
+            ViewerCountText.Text = $"{count} Viewer{(count != 1 ? "s" : "")}";
 
-            IconVolume.Visibility = Visibility.Visible;
-            SliderVolume.Visibility = Visibility.Visible;
-            BtnSettings.Visibility = Visibility.Visible;
-            BtnPip.Visibility = Visibility.Visible;
-            BtnTheater.Visibility = Visibility.Visible;
-            BtnFullscreen.Visibility = Visibility.Visible;
-        }
-
-        private void BtnWatchParty_Click(object sender, RoutedEventArgs e)
-        {
-            BtnHost.Visibility = Visibility.Visible;
-            BtnHost.IsEnabled = true;
-            BtnClient.Visibility = Visibility.Visible;
-            BtnClient.IsEnabled = true;
-            BtnWatchParty.IsEnabled = false;
-
-            PanelHost.Visibility = Visibility.Collapsed;
-            PanelClient.Visibility = Visibility.Collapsed;
-            PanelWatchParty.Visibility = Visibility.Visible;
-
-            IconVolume.Visibility = Visibility.Collapsed;
-            SliderVolume.Visibility = Visibility.Collapsed;
-            BtnSettings.Visibility = Visibility.Collapsed;
-            BtnPip.Visibility = Visibility.Collapsed;
-            BtnTheater.Visibility = Visibility.Collapsed;
-            BtnFullscreen.Visibility = Visibility.Collapsed;
-
-            VideoBorder.Visibility = Visibility.Collapsed;
-            WatchPartyArea.Visibility = Visibility.Visible;
-        }
-
-        private async void BtnConnectWatchParty_Click(object sender, RoutedEventArgs e)
-        {
-            var selected = LstWatchPartyFriends.SelectedItems.Cast<Friend>().ToList();
-            if (selected.Count == 0)
+            if (count == 0)
             {
-                System.Windows.MessageBox.Show("Selecione ao menos um amigo na lista.");
+                ViewerCountPanel.ToolTip = "Ninguém assistindo ainda";
                 return;
             }
 
-            string password = TxtWatchPartyPassword.Text;
-            foreach (var friend in selected)
+            // IP conhecido vira o apelido salvo; desconhecido aparece como IP mesmo.
+            var names = ips.Select(ip =>
             {
-                if (_watchPartySessions.Any(s => s.Ip == friend.Ip)) continue;
-
-                var session = new ViewerSession(friend.Name, friend.Ip, password);
-                _watchPartySessions.Add(session);
-                TabWatchParty.SelectedItem = session;
-
-                try
-                {
-                    await session.ConnectAsync();
-                }
-                catch (Exception ex)
-                {
-                    System.Windows.MessageBox.Show($"Erro ao conectar com {friend.Name}: {ex.Message}");
-                    _watchPartySessions.Remove(session);
-                }
-            }
-        }
-
-        private void StreamTab_OnCloseRequested(ViewerSession session)
-        {
-            session.Disconnect();
-            _watchPartySessions.Remove(session);
-        }
-
-        private void ToggleGridView_Changed(object sender, RoutedEventArgs e)
-        {
-            bool gridMode = ToggleGridView.IsChecked == true;
-            TabWatchParty.Visibility = gridMode ? Visibility.Collapsed : Visibility.Visible;
-            GridWatchParty.Visibility = gridMode ? Visibility.Visible : Visibility.Collapsed;
-        }
-
-        private async void BtnConnect_Click(object sender, RoutedEventArgs e)
-        {
-            string ip = CboFriends.Text;
-            if (string.IsNullOrWhiteSpace(ip)) return;
-
-            if (_client == null)
-            {
-                _client = new SignalingClient();
-
-                _client.OnMessageReceived += async (message) => {
-                    if (message == "AUTH_REQUIRED")
-                    {
-                        var pwd = "";
-                        System.Windows.Application.Current.Dispatcher.Invoke(() => { pwd = TxtClientPassword.Text; });
-                        if (string.IsNullOrEmpty(pwd))
-                        {
-                            System.Windows.Application.Current.Dispatcher.Invoke(() => {
-                                System.Windows.MessageBox.Show("Esta sala requer uma senha. Preencha o campo de Senha e tente novamente.");
-                                BtnDisconnect_Click(null, null);
-                            });
-                        }
-                        else
-                        {
-                            var authMsg = new SignalingMessage { Type = "AUTH", Data = pwd };
-                            _client.SendMessage(System.Text.Json.JsonSerializer.Serialize(authMsg));
-                        }
-                        return;
-                    }
-                    if (message == "AUTH_FAIL")
-                    {
-                        System.Windows.Application.Current.Dispatcher.Invoke(() => {
-                            System.Windows.MessageBox.Show("Senha incorreta!");
-                            BtnDisconnect_Click(null, null);
-                        });
-                        return;
-                    }
-                    if (message == "AUTH_OK")
-                    {
-                        System.Windows.Application.Current.Dispatcher.Invoke(() => {
-                            _client.EnableEncryption(TxtClientPassword.Text);
-                            var helloMsg = new SignalingMessage { Type = "CLIENT_CONNECTED", Data = "", SenderId = "client" };
-                            _client.SendMessage(System.Text.Json.JsonSerializer.Serialize(helloMsg));
-                        });
-                        return;
-                    }
-                    if (message == "SOURCE_CHANGED")
-                    {
-                        System.Windows.Application.Current.Dispatcher.InvokeAsync(async () => {
-                            _showingSourceChangedMessage = true;
-                            StatusText.Text = "Host trocou de tela...";
-                            StatusText.Visibility = Visibility.Visible;
-                            await System.Threading.Tasks.Task.Delay(2000);
-                            _showingSourceChangedMessage = false;
-                            if (_streamManager != null) StatusText.Visibility = Visibility.Collapsed;
-                        });
-                        return;
-                    }
-                    if (message == "STREAM_STOPPED")
-                    {
-                        System.Windows.Application.Current.Dispatcher.Invoke(() => {
-                            try { _streamManager?.Stop(); } catch { }
-                            VideoPlayer.Source = null;
-                            StatusText.Text = "Transmissão Encerrada";
-                            StatusText.Visibility = Visibility.Visible;
-                            StatsOverlay.Visibility = Visibility.Collapsed;
-                        });
-                        return;
-                    }
-                    if (message == "STREAM_STARTED")
-                    {
-                        System.Windows.Application.Current.Dispatcher.Invoke(async () => {
-                            await SetupClientStreamManagerAsync();
-                            var msg = new SignalingMessage { Type = "CLIENT_CONNECTED", Data = "", SenderId = "client" };
-                            _client.SendMessage(System.Text.Json.JsonSerializer.Serialize(msg));
-                        });
-                        return;
-                    }
-                    var parsed = SignalingMessage.Deserialize(message);
-                    if (parsed != null && parsed.Type == "STATUS_RESPONSE")
-                    {
-                        if (parsed.Data == "IDLE")
-                        {
-                            System.Windows.Application.Current.Dispatcher.Invoke(() => {
-                                StatusText.Text = "Host não está em live";
-                                StatusText.Visibility = Visibility.Visible;
-                            });
-                        }
-                        return;
-                    }
-
-                    if (_streamManager != null)
-                        await _streamManager.HandleSignalingMessage("host", message);
-                };
-
-                _client.OnBinaryReceived += (data) => {
-                    _streamManager?.ProcessReceivedBinary(data);
-                };
-
-                _client.OnConnected += (isReconnect) => {
-                    System.Windows.Application.Current.Dispatcher.Invoke(async () => {
-                        if (isReconnect)
-                        {
-                            StatusText.Text = "Reconectado!";
-                            StatusText.Visibility = Visibility.Visible;
-                            await SetupClientStreamManagerAsync();
-                            _ = HideStatusTextAfterDelay(2000);
-                        }
-                        var statusMsg = new SignalingMessage { Type = "STATUS_CHECK" };
-                        _client.SendMessage(System.Text.Json.JsonSerializer.Serialize(statusMsg));
-                        var helloMsg = new SignalingMessage { Type = "CLIENT_CONNECTED", Data = "", SenderId = "client" };
-                        _client.SendMessage(System.Text.Json.JsonSerializer.Serialize(helloMsg));
-                    });
-                };
-
-                _client.OnReconnecting += (attempt) => {
-                    System.Windows.Application.Current.Dispatcher.Invoke(() => {
-                        StatusText.Text = $"Reconectando... ({attempt}/10)";
-                        StatusText.Visibility = Visibility.Visible;
-                    });
-                };
-
-                _client.OnReconnectFailed += () => {
-                    System.Windows.Application.Current.Dispatcher.Invoke(() => {
-                        System.Windows.MessageBox.Show("Não foi possível reconectar ao host.");
-                        BtnDisconnect_Click(null, null);
-                    });
-                };
-
-                _client.OnLatencyUpdated += (ms) => {
-                    _lastLatencyMs = ms;
-                    System.Windows.Application.Current.Dispatcher.InvokeAsync(UpdateViewerStatsOverlay);
-                };
-
-                try
-                {
-                    await SetupClientStreamManagerAsync();
-                    await _client.StartAsync(ip, 8080);
-
-                    BtnConnect.Content = "Connected";
-                    BtnConnect.IsEnabled = false;
-                    BtnDisconnect.IsEnabled = true;
-                    CboFriends.IsEnabled = false;
-                    BtnAddFriend.IsEnabled = false;
-                    BtnRemoveFriend.IsEnabled = false;
-                    BtnHost.Visibility = Visibility.Collapsed;
-                }
-                catch (Exception ex)
-                {
-                    System.Windows.MessageBox.Show($"Erro ao conectar: {ex.Message}");
-                    _client = null;
-                }
-            }
-        }
-
-        private async System.Threading.Tasks.Task SetupClientStreamManagerAsync()
-        {
-            if (_streamManager != null)
-            {
-                try { _streamManager.Stop(); } catch { }
-            }
-
-            _streamManager = new StreamManager();
-            _streamManager.SetVolume((float)SliderVolume.Value / 100f);
-
-            _streamManager.OnVideoFrameDecoded += (pixelData, width, height, stride) => {
-                StreamManager_OnVideoFrameDecoded(pixelData, width, height, stride);
-                System.Windows.Application.Current.Dispatcher.InvokeAsync(() => {
-                    if (!_showingSourceChangedMessage) StatusText.Visibility = Visibility.Collapsed;
-                });
-            };
-
-            _streamManager.OnConnectionStateChanged += (state) => {
-                System.Windows.Application.Current.Dispatcher.InvokeAsync(() => {
-                    if (StatusText.Text == "Transmissão Encerrada" && (state.ToString() == "closed" || state.ToString() == "disconnected" || state.ToString() == "failed")) return;
-                    StatusText.Text = $"WebRTC: {state}";
-                    StatusText.Visibility = Visibility.Visible;
-                });
-            };
-
-            _streamManager.OnLocalSdpReady += (clientId, sdpJson) => {
-                _client?.SendMessage(sdpJson);
-            };
-
-            _streamManager.OnViewerFpsUpdated += (fps) => {
-                _lastViewerFps = fps;
-                System.Windows.Application.Current.Dispatcher.InvokeAsync(UpdateViewerStatsOverlay);
-            };
-
-            await _streamManager.InitializeClient();
-        }
-
-        private void UpdateViewerStatsOverlay()
-        {
-            StatsOverlay.Visibility = Visibility.Visible;
-            StatsText.Text = $"📥 {_lastViewerFps}fps | {_lastLatencyMs}ms";
-        }
-
-        private async System.Threading.Tasks.Task HideStatusTextAfterDelay(int delayMs)
-        {
-            await System.Threading.Tasks.Task.Delay(delayMs);
-            System.Windows.Application.Current.Dispatcher.Invoke(() => {
-                if (_streamManager != null) StatusText.Visibility = Visibility.Collapsed;
+                var friend = _friends?.FirstOrDefault(f =>
+                    string.Equals(SignalingServer.NormalizeIp(f.Ip), ip, StringComparison.OrdinalIgnoreCase));
+                return friend != null ? friend.DisplayName : ip;
             });
+
+            ViewerCountPanel.ToolTip = "Assistindo agora:\n• " + string.Join("\n• ", names);
         }
-
-        private void StreamManager_OnLocalVideoFrameReady(byte[] pixelData, int width, int height, int stride)
-        {
-            System.Windows.Application.Current.Dispatcher.InvokeAsync(() =>
-            {
-                if (_writeableBitmap == null || _writeableBitmap.PixelWidth != width || _writeableBitmap.PixelHeight != height || _writeableBitmap.Format != PixelFormats.Bgr24)
-                {
-                    _writeableBitmap = new WriteableBitmap(width, height, 96, 96, PixelFormats.Bgr24, null);
-                    VideoPlayer.Source = _writeableBitmap;
-                    _activePip?.SetBitmap(_writeableBitmap);
-                }
-
-                _writeableBitmap.Lock();
-                Marshal.Copy(pixelData, 0, _writeableBitmap.BackBuffer, pixelData.Length);
-                _writeableBitmap.AddDirtyRect(new Int32Rect(0, 0, width, height));
-                _writeableBitmap.Unlock();
-            });
-        }
-
-        private void Client_OnBinaryReceived(byte[] data)
-        {
-            _streamManager?.ProcessReceivedBinary(data);
-        }
-
-        private void StreamManager_OnVideoFrameDecoded(byte[] pixelData, int width, int height, int stride)
-        {
-            System.Windows.Application.Current.Dispatcher.InvokeAsync(() =>
-            {
-                if (_writeableBitmap == null || _writeableBitmap.PixelWidth != width || _writeableBitmap.PixelHeight != height || _writeableBitmap.Format != PixelFormats.Bgr24)
-                {
-                    _writeableBitmap = new WriteableBitmap(width, height, 96, 96, PixelFormats.Bgr24, null);
-                    VideoPlayer.Source = _writeableBitmap;
-                    _activePip?.SetBitmap(_writeableBitmap);
-                }
-
-                _writeableBitmap.Lock();
-                Marshal.Copy(pixelData, 0, _writeableBitmap.BackBuffer, pixelData.Length);
-                _writeableBitmap.AddDirtyRect(new Int32Rect(0, 0, width, height));
-                _writeableBitmap.Unlock();
-            });
-        }
-
 
         private async void BtnStartStream_Click(object sender, RoutedEventArgs e)
         {
-            if (CboWindows.SelectedItem is CaptureSource selectedSource)
+            if (!(CboWindows.SelectedItem is CaptureSource selectedSource))
             {
-                BtnStartStream.Content = "Streaming...";
-                BtnStartStream.IsEnabled = false;
-                BtnStopStream.IsEnabled = true;
-                BtnClient.Visibility = Visibility.Collapsed;
+                System.Windows.MessageBox.Show("Selecione uma tela para transmitir.");
+                return;
+            }
 
-                if (_streamManager != null)
-                {
-                    _streamManager.Stop();
-                }
+            var passwordDialog = RoomPasswordDialog.ForHost(_lastRoomPassword);
+            passwordDialog.Owner = this;
+            if (passwordDialog.ShowDialog() != true) return;
 
-                _streamManager = new StreamManager();
-                _streamManager.SetMaxPerformanceMode(ChkMaxPerformance?.IsChecked == true);
-                
-                _streamManager.OnAudioCaptureError += (error) => {
-                    System.Windows.Application.Current.Dispatcher.Invoke(() => {
-                        System.Windows.MessageBox.Show(error, "Aviso - Captura de Áudio", 
-                            MessageBoxButton.OK, MessageBoxImage.Warning);
-                    });
-                };
-                
-                _streamManager.OnLocalSdpReady += (clientId, sdpJson) => {
-                    if (_server == null) return;
-                    _server.SendToClient(clientId, sdpJson);
-                };
+            _lastRoomPassword = passwordDialog.Password ?? string.Empty;
 
-                _streamManager.OnBinaryDataReady += (data) => {
-                    _server?.BroadcastBinary(data);
-                };
+            BtnStartStream.Content = "Streaming...";
+            BtnStartStream.IsEnabled = false;
+            BtnStopStream.IsEnabled = true;
+            BtnViewer.IsEnabled = false;
 
-                if (_server != null)
-                {
-                    _server.RoomPassword = TxtRoomPassword.Text;
-                    _server.IsStreaming = true;
-                }
+            if (_hostStreamManager != null)
+            {
+                _hostStreamManager.Stop();
+            }
 
-                _streamManager.OnLocalVideoFrameReady += (pixelData, width, height, stride) => {
-                    StreamManager_OnLocalVideoFrameReady(pixelData, width, height, stride);
-                    System.Windows.Application.Current.Dispatcher.InvokeAsync(() => {
-                        StatusText.Visibility = Visibility.Collapsed;
-                    });
-                };
+            _hostStreamManager = new StreamManager();
+            _hostStreamManager.SetMaxPerformanceMode(ChkMaxPerformance?.IsChecked == true);
 
-                _streamManager.OnConnectionStateChanged += (state) => {
-                    System.Windows.Application.Current.Dispatcher.InvokeAsync(() => {
-                        StatusText.Text = $"WebRTC: {state}";
-                        StatusText.Visibility = Visibility.Visible;
-                    });
-                };
-
-                _streamManager.OnHostStatsUpdated += (fps, kbps) => {
-                    System.Windows.Application.Current.Dispatcher.InvokeAsync(() => {
-                        StatsOverlay.Visibility = Visibility.Visible;
-                        StatsText.Text = $"📤 {fps}fps | {kbps:F1} kbps";
-                    });
-                };
-
-                await System.Threading.Tasks.Task.Run(() =>
-                {
-                    _streamManager.SetTargetSource(selectedSource);
-                    _streamManager.SetResolution(1920, 1080); // Forçar 1080p HD
-                    _streamManager.InitializeHost();
+            _hostStreamManager.OnAudioCaptureError += (error) => {
+                System.Windows.Application.Current.Dispatcher.Invoke(() => {
+                    System.Windows.MessageBox.Show(error, "Aviso - Captura de Áudio",
+                        MessageBoxButton.OK, MessageBoxImage.Warning);
                 });
-                
-                _server?.BroadcastMessage("STREAM_STARTED");
-            }
-            else
+            };
+
+            _hostStreamManager.OnLocalSdpReady += (clientId, sdpJson) => {
+                _server?.SendToClient(clientId, sdpJson);
+            };
+
+            _hostStreamManager.OnBinaryDataReady += (data) => {
+                _server?.BroadcastBinary(data);
+            };
+
+            if (_server != null)
             {
-                System.Windows.MessageBox.Show("Selecione uma janela para transmitir.");
+                _server.RoomPassword = _lastRoomPassword;
+                _server.IsStreaming = true;
             }
+
+            _hostStreamManager.OnLocalVideoFrameReady += (pixelData, width, height, stride) => {
+                UpdateHostBitmap(pixelData, width, height);
+                System.Windows.Application.Current.Dispatcher.InvokeAsync(() => {
+                    HostEmptyState.Visibility = Visibility.Collapsed;
+                });
+            };
+
+            _hostStreamManager.OnConnectionStateChanged += (state) => {
+                System.Windows.Application.Current.Dispatcher.InvokeAsync(() => {
+                    StatusText.Text = $"WebRTC: {state}";
+                });
+            };
+
+            _hostStreamManager.OnHostStatsUpdated += (fps, kbps) => {
+                System.Windows.Application.Current.Dispatcher.InvokeAsync(() => {
+                    StatsOverlay.Visibility = Visibility.Visible;
+                    StatsText.Text = $"📤 {fps}fps | {kbps:F1} kbps";
+                });
+            };
+
+            await System.Threading.Tasks.Task.Run(() =>
+            {
+                _hostStreamManager.SetTargetSource(selectedSource);
+                _hostStreamManager.SetResolution(1920, 1080);
+                _hostStreamManager.InitializeHost();
+            });
+
+            _server?.BroadcastMessage("STREAM_STARTED");
         }
 
         private void BtnStopStream_Click(object sender, RoutedEventArgs e)
@@ -636,103 +363,251 @@ namespace RadminStreamApp
             {
                 _server.IsStreaming = false;
                 _server.BroadcastMessage("STREAM_STOPPED");
+                _server.RoomPassword = string.Empty;
             }
-            if (_streamManager != null)
+            if (_hostStreamManager != null)
             {
-                try { _streamManager.Stop(); } catch { }
-                _streamManager = null;
+                try { _hostStreamManager.Stop(); } catch { }
+                _hostStreamManager = null;
             }
-            BtnStartStream.Content = "Start Stream";
+
+            BtnStartStream.Content = "Start";
             BtnStartStream.IsEnabled = true;
             BtnStopStream.IsEnabled = false;
-            CboWindows.IsEnabled = true;
-            BtnClient.Visibility = Visibility.Visible;
+            BtnViewer.IsEnabled = true;
             VideoPlayer.Source = null;
-            _writeableBitmap = null;
+            _hostBitmap = null;
             StatusText.Text = "No Signal";
-            StatusText.Visibility = Visibility.Visible;
+            HostEmptyState.Visibility = Visibility.Visible;
             StatsOverlay.Visibility = Visibility.Collapsed;
         }
 
-        private void CboFriends_SelectionChanged(object sender, System.Windows.Controls.SelectionChangedEventArgs e)
+        private void UpdateHostBitmap(byte[] pixelData, int width, int height)
         {
-            if (CboFriends.SelectedItem is Friend friend)
+            System.Windows.Application.Current.Dispatcher.InvokeAsync(() =>
             {
-                // No action needed for text update since DisplayMemberPath is set or we handle it via binding
+                if (_hostBitmap == null || _hostBitmap.PixelWidth != width || _hostBitmap.PixelHeight != height || _hostBitmap.Format != PixelFormats.Bgr24)
+                {
+                    _hostBitmap = new WriteableBitmap(width, height, 96, 96, PixelFormats.Bgr24, null);
+                    VideoPlayer.Source = _hostBitmap;
+                }
+
+                _hostBitmap.Lock();
+                Marshal.Copy(pixelData, 0, _hostBitmap.BackBuffer, pixelData.Length);
+                _hostBitmap.AddDirtyRect(new Int32Rect(0, 0, width, height));
+                _hostBitmap.Unlock();
+            });
+        }
+
+        // ───────────────────────────── Assistir ─────────────────────────────
+
+        private async void FriendCard_Click(object sender, System.Windows.Input.MouseButtonEventArgs e)
+        {
+            if (!(sender is FrameworkElement element) || !(element.DataContext is Friend friend)) return;
+            await ToggleFriendSessionAsync(friend);
+        }
+
+        private async System.Threading.Tasks.Task ToggleFriendSessionAsync(Friend friend)
+        {
+            var existing = _sessions.FirstOrDefault(s => s.Friend == friend);
+            if (existing != null)
+            {
+                CloseSession(existing);
+                return;
+            }
+
+            if (!friend.IsOnline)
+            {
+                ViewerEmptyText.Text = $"{friend.DisplayName} está offline";
+                return;
+            }
+
+            var session = new ViewerSession(friend);
+            session.PasswordRequested += Session_PasswordRequested;
+
+            _sessions.Add(session);
+            SetActiveSession(session);
+
+            try
+            {
+                await session.ConnectAsync();
+            }
+            catch (Exception ex)
+            {
+                System.Windows.MessageBox.Show($"Erro ao conectar com {friend.DisplayName}: {ex.Message}");
+                CloseSession(session);
             }
         }
 
-        private void BtnAddFriend_Click(object sender, RoutedEventArgs e)
+        private void Session_PasswordRequested(ViewerSession session, bool previousAttemptFailed)
         {
-            string ip = CboFriends.Text?.Trim();
-            if (string.IsNullOrWhiteSpace(ip)) return;
+            var dialog = RoomPasswordDialog.ForViewer(session.FriendName, previousAttemptFailed);
+            dialog.Owner = this;
 
-            var dialog = new AddFriendDialog(ip) { Owner = this };
             if (dialog.ShowDialog() == true)
             {
-                string name = string.IsNullOrWhiteSpace(dialog.FriendName) ? ip : dialog.FriendName;
-                var friend = new Friend { Name = name, Ip = ip };
-                _friends.Add(friend);
-                FriendsService.SaveFriends(new System.Collections.Generic.List<Friend>(_friends));
-                CboFriends.SelectedItem = friend;
-                _ = CheckFriendStatusAsync(friend);
+                session.SubmitPassword(dialog.Password);
             }
-        }
-
-        private void BtnRemoveFriend_Click(object sender, RoutedEventArgs e)
-        {
-            if (CboFriends.SelectedItem is Friend friend)
+            else
             {
-                _friends.Remove(friend);
-                FriendsService.SaveFriends(new System.Collections.Generic.List<Friend>(_friends));
+                session.CancelPassword();
+                CloseSession(session);
             }
         }
 
-        private void BtnDisconnect_Click(object sender, RoutedEventArgs e)
+        private void CloseSession(ViewerSession session)
         {
-            _client?.Stop();
-            _streamManager?.Stop();
+            if (session == null) return;
 
-            _client = null;
-            _streamManager = null;
+            session.PasswordRequested -= Session_PasswordRequested;
+            session.Disconnect();
+            _sessions.Remove(session);
 
-            _activePip?.Close();
-            _activePip = null;
-
-            BtnConnect.Content = "Connect";
-            BtnConnect.IsEnabled = true;
-            BtnDisconnect.IsEnabled = false;
-            CboFriends.IsEnabled = true;
-            BtnAddFriend.IsEnabled = true;
-            BtnRemoveFriend.IsEnabled = true;
-            BtnHost.Visibility = Visibility.Visible;
-            VideoPlayer.Source = null;
-            _writeableBitmap = null;
-            StatusText.Text = "No Signal";
-            StatusText.Visibility = Visibility.Visible;
-            StatsOverlay.Visibility = Visibility.Collapsed;
-        }
-        
-        protected override void OnClosed(EventArgs e)
-        {
-            _server?.Stop();
-            _client?.Stop();
-            _streamManager?.Stop();
-            foreach (var session in _watchPartySessions.ToList())
+            if (_activeSession == session)
             {
-                session.Dispose();
+                SetActiveSession(_sessions.FirstOrDefault());
             }
-            base.OnClosed(e);
-            Environment.Exit(0);
+
+            if (_activePip != null && _sessions.Count == 0)
+            {
+                _activePip.Close();
+                _activePip = null;
+            }
         }
+
+        private void SetActiveSession(ViewerSession session)
+        {
+            if (_activeSession == session) return;
+
+            if (_activeSession != null)
+            {
+                _activeSession.IsActive = false;
+                _activeSession.PropertyChanged -= ActiveSession_PropertyChanged;
+            }
+
+            _activeSession = session;
+
+            if (_activeSession != null)
+            {
+                _activeSession.IsActive = true;
+                _activeSession.PropertyChanged += ActiveSession_PropertyChanged;
+                _activePip?.SetBitmap(_activeSession.VideoBitmap);
+            }
+        }
+
+        private void ActiveSession_PropertyChanged(object sender, PropertyChangedEventArgs e)
+        {
+            if (e.PropertyName == nameof(ViewerSession.VideoBitmap) && _activePip != null)
+            {
+                System.Windows.Application.Current.Dispatcher.InvokeAsync(() =>
+                    _activePip?.SetBitmap(_activeSession?.VideoBitmap));
+            }
+        }
+
+        private void Sessions_CollectionChanged(object sender, NotifyCollectionChangedEventArgs e)
+        {
+            UpdateViewerLayout();
+            _friendsView?.Refresh();
+        }
+
+        private void UpdateViewerLayout()
+        {
+            int count = _sessions.Count;
+
+            GridColumns = count <= 1 ? 1 : (count == 2 ? 2 : (count <= 4 ? 2 : 3));
+            ViewerEmptyState.Visibility = count == 0 ? Visibility.Visible : Visibility.Collapsed;
+
+            if (count == 0)
+            {
+                ViewerEmptyText.Text = "Clique em um amigo à esquerda para assistir";
+            }
+
+            // Com uma live só a sidebar sai da frente e volta quando o mouse encosta na borda esquerda.
+            bool autoHideSidebar = count == 1;
+            if (autoHideSidebar)
+            {
+                SidebarColumn.Width = new GridLength(0);
+                System.Windows.Controls.Grid.SetColumnSpan(SidebarPanel, 2);
+                SidebarPanel.HorizontalAlignment = System.Windows.HorizontalAlignment.Left;
+                SidebarPanel.Width = 230;
+                SidebarPanel.Visibility = Visibility.Collapsed;
+                SidebarHoverStrip.Visibility = Visibility.Visible;
+            }
+            else
+            {
+                SidebarColumn.Width = new GridLength(230);
+                System.Windows.Controls.Grid.SetColumnSpan(SidebarPanel, 1);
+                SidebarPanel.HorizontalAlignment = System.Windows.HorizontalAlignment.Stretch;
+                SidebarPanel.Width = double.NaN;
+                SidebarPanel.Visibility = Visibility.Visible;
+                SidebarHoverStrip.Visibility = Visibility.Collapsed;
+            }
+        }
+
+        private void SidebarHoverStrip_MouseEnter(object sender, System.Windows.Input.MouseEventArgs e)
+        {
+            if (SidebarHoverStrip.Visibility == Visibility.Visible)
+            {
+                SidebarPanel.Visibility = Visibility.Visible;
+            }
+        }
+
+        private void SidebarPanel_MouseLeave(object sender, System.Windows.Input.MouseEventArgs e)
+        {
+            if (SidebarHoverStrip.Visibility == Visibility.Visible)
+            {
+                SidebarPanel.Visibility = Visibility.Collapsed;
+            }
+        }
+
+        private void StreamTab_OnCloseRequested(ViewerSession session) => CloseSession(session);
+
+        private void StreamTab_OnActivated(ViewerSession session) => SetActiveSession(session);
+
+        private void StreamTab_OnFullscreenRequested(ViewerSession session)
+        {
+            SetActiveSession(session);
+            if (WindowStyle == WindowStyle.None) ExitFullscreen();
+            else EnterFullscreen();
+        }
+
+        private void TabSessions_SelectionChanged(object sender, System.Windows.Controls.SelectionChangedEventArgs e)
+        {
+            if (TabSessions.SelectedItem is ViewerSession session) SetActiveSession(session);
+        }
+
+        private void ToggleTabsView_Changed(object sender, RoutedEventArgs e)
+        {
+            bool tabsMode = ToggleTabsView.IsChecked == true;
+            TxtLayoutMode.Text = tabsMode ? "Abas" : "Grade";
+            TabSessions.Visibility = tabsMode ? Visibility.Visible : Visibility.Collapsed;
+            GridSessions.Visibility = tabsMode ? Visibility.Collapsed : Visibility.Visible;
+
+            if (tabsMode && _activeSession != null)
+            {
+                TabSessions.SelectedItem = _activeSession;
+            }
+        }
+
+        private void BtnManageFriends_Click(object sender, RoutedEventArgs e)
+        {
+            var dialog = new ManageFriendsDialog(_friends) { Owner = this };
+            dialog.FriendAdded += (friend) => { _ = CheckFriendStatusAsync(friend); };
+            dialog.ShowDialog();
+
+            _ = RefreshAllFriendsStatusAsync();
+            UpdateSidebarEmptyStates();
+        }
+
+        // ───────────────────────────── Controles de vídeo ─────────────────────────────
 
         private void BtnPip_Click(object sender, RoutedEventArgs e)
         {
-            if (_writeableBitmap == null) return;
+            if (_activeSession?.VideoBitmap == null) return;
 
             if (_activePip == null)
             {
-                _activePip = new PipWindow(_writeableBitmap, v => _streamManager?.SetVolume(v));
+                _activePip = new PipWindow(_activeSession.VideoBitmap, v => _activeSession?.SetVolumeFromPip(v));
                 _activePip.OnRestoreRequested += () => {
                     System.Windows.Application.Current.Dispatcher.Invoke(() => {
                         WindowState = WindowState.Normal;
@@ -747,22 +622,42 @@ namespace RadminStreamApp
             WindowState = WindowState.Minimized;
         }
 
+        private void BtnQuality_Click(object sender, RoutedEventArgs e)
+        {
+            if (BtnQuality.ContextMenu != null)
+            {
+                BtnQuality.ContextMenu.PlacementTarget = BtnQuality;
+                BtnQuality.ContextMenu.Placement = System.Windows.Controls.Primitives.PlacementMode.Bottom;
+                BtnQuality.ContextMenu.IsOpen = true;
+            }
+        }
+
+        private void MenuItemQuality_Click(object sender, RoutedEventArgs e)
+        {
+            if (sender is System.Windows.Controls.MenuItem menuItem && menuItem.Tag is string quality)
+            {
+                _activeSession?.SetQuality(quality);
+            }
+        }
+
         private void BtnFullscreen_Click(object sender, RoutedEventArgs e)
         {
-            if (WindowStyle == WindowStyle.None)
-                ExitFullscreen();
-            else
-                EnterFullscreen();
+            if (WindowStyle == WindowStyle.None) ExitFullscreen();
+            else EnterFullscreen();
+        }
+
+        private void BtnTheater_Click(object sender, RoutedEventArgs e)
+        {
+            if (WindowStyle == WindowStyle.None) ExitFullscreen();
+            else EnterTheaterMode();
         }
 
         private void VideoPlayer_MouseDown(object sender, System.Windows.Input.MouseButtonEventArgs e)
         {
             if (e.ClickCount == 2)
             {
-                if (TitleBarGrid.Visibility == Visibility.Collapsed)
-                    ExitFullscreen();
-                else
-                    EnterFullscreen();
+                if (TitleBarGrid.Visibility == Visibility.Collapsed) ExitFullscreen();
+                else EnterFullscreen();
             }
         }
 
@@ -774,15 +669,14 @@ namespace RadminStreamApp
             System.Windows.Shell.WindowChrome.SetWindowChrome(this, null);
             Visibility = Visibility.Collapsed;
             WindowStyle = WindowStyle.None;
-            ResizeMode = ResizeMode.NoResize; // Fixes white border in fullscreen
+            ResizeMode = ResizeMode.NoResize;
             Topmost = true;
             WindowState = WindowState.Maximized;
             Visibility = Visibility.Visible;
             TitleBarGrid.Visibility = Visibility.Collapsed;
             TopPanel.Visibility = Visibility.Collapsed;
             OverlayGrid.Visibility = Visibility.Visible;
-            VideoBorder.Margin = new Thickness(0);
-            VideoBorder.CornerRadius = new CornerRadius(0);
+            ApplyImmersiveMargins(true);
         }
 
         private void EnterTheaterMode()
@@ -791,8 +685,7 @@ namespace RadminStreamApp
             TitleBarGrid.Visibility = Visibility.Collapsed;
             TopPanel.Visibility = Visibility.Collapsed;
             OverlayGrid.Visibility = Visibility.Visible;
-            VideoBorder.Margin = new Thickness(0);
-            VideoBorder.CornerRadius = new CornerRadius(0);
+            ApplyImmersiveMargins(true);
         }
 
         private void ExitFullscreen()
@@ -813,55 +706,17 @@ namespace RadminStreamApp
             TitleBarGrid.Visibility = Visibility.Visible;
             TopPanel.Visibility = Visibility.Visible;
             OverlayGrid.Visibility = Visibility.Collapsed;
-            VideoBorder.Margin = new Thickness(15, 0, 15, 15);
-            VideoBorder.CornerRadius = new CornerRadius(8);
+            ApplyImmersiveMargins(false);
         }
 
-        private void BtnSettings_Click(object sender, RoutedEventArgs e)
+        private void ApplyImmersiveMargins(bool immersive)
         {
-            if (BtnSettings.ContextMenu != null)
-            {
-                BtnSettings.ContextMenu.PlacementTarget = BtnSettings;
-                BtnSettings.ContextMenu.Placement = System.Windows.Controls.Primitives.PlacementMode.Top;
-                BtnSettings.ContextMenu.IsOpen = true;
-            }
+            VideoBorder.Margin = immersive ? new Thickness(0) : new Thickness(15, 0, 15, 15);
+            VideoBorder.CornerRadius = immersive ? new CornerRadius(0) : new CornerRadius(12);
+            ViewerArea.Margin = immersive ? new Thickness(0) : new Thickness(15, 0, 15, 15);
         }
 
-        private void MenuItemQuality_Click(object sender, RoutedEventArgs e)
-        {
-            if (sender is System.Windows.Controls.MenuItem menuItem && menuItem.Tag is string quality)
-            {
-                if (quality == "1080p" || quality == "720p")
-                {
-                    BadgeHD.Visibility = Visibility.Visible;
-                    TextHD.Text = "HD";
-                }
-                else
-                {
-                    BadgeHD.Visibility = Visibility.Collapsed;
-                }
-
-                if (_client != null)
-                {
-                    var msg = new SignalingMessage { Type = "SET_QUALITY", Data = quality, SenderId = "client" };
-                    _client.SendMessage(System.Text.Json.JsonSerializer.Serialize(msg));
-                }
-                else if (_streamManager != null)
-                {
-                    if (quality == "1080p") _streamManager.SetResolution(1920, 1080);
-                    else if (quality == "720p") _streamManager.SetResolution(1280, 720);
-                    else if (quality == "480p") _streamManager.SetResolution(854, 480);
-                }
-            }
-        }
-
-        private void BtnTheater_Click(object sender, RoutedEventArgs e)
-        {
-            if (WindowStyle == WindowStyle.None)
-                ExitFullscreen();
-            else
-                EnterTheaterMode();
-        }
+        // ───────────────────────────── Janela ─────────────────────────────
 
         private void Window_MouseLeftButtonDown(object sender, System.Windows.Input.MouseButtonEventArgs e)
         {
@@ -873,84 +728,69 @@ namespace RadminStreamApp
 
         private void Window_PreviewKeyDown(object sender, System.Windows.Input.KeyEventArgs e)
         {
-            if (e.Key == System.Windows.Input.Key.Escape)
+            if (e.Key == System.Windows.Input.Key.Escape && WindowStyle == WindowStyle.None)
             {
-                if (WindowStyle == WindowStyle.None)
-                {
-                    ExitFullscreen();
-                }
+                ExitFullscreen();
             }
         }
 
         private void MainWindow_MouseMove(object sender, System.Windows.Input.MouseEventArgs e)
         {
-            if (VideoControlsPanel != null)
-            {
-                VideoControlsPanel.Visibility = Visibility.Visible;
-                Cursor = System.Windows.Input.Cursors.Arrow;
-                _mouseIdleTimer.Stop();
-                _mouseIdleTimer.Start();
-            }
+            Cursor = System.Windows.Input.Cursors.Arrow;
+            _mouseIdleTimer.Stop();
+            _mouseIdleTimer.Start();
         }
 
         private void MouseIdleTimer_Tick(object sender, EventArgs e)
         {
             _mouseIdleTimer.Stop();
-            if (VideoControlsPanel != null)
+            if (WindowStyle == WindowStyle.None) Cursor = System.Windows.Input.Cursors.None;
+        }
+
+        private void BtnUpdate_Click(object sender, RoutedEventArgs e)
+        {
+            if (!string.IsNullOrEmpty(_downloadUrl))
             {
-                VideoControlsPanel.Visibility = Visibility.Collapsed;
-                if (WindowStyle == WindowStyle.None) Cursor = System.Windows.Input.Cursors.None;
+                BtnUpdate.Content = "Baixando...";
+                BtnUpdate.IsEnabled = false;
+                BtnDismissUpdate.IsEnabled = false;
+                _ = UpdateManager.DownloadAndInstallUpdateAsync(_downloadUrl);
             }
         }
 
-        private void BtnMinimize_Click(object sender, RoutedEventArgs e)
+        private void BtnDismissUpdate_Click(object sender, RoutedEventArgs e)
         {
-            WindowState = WindowState.Minimized;
+            UpdateBanner.Visibility = Visibility.Collapsed;
         }
+
+        private void BtnMinimize_Click(object sender, RoutedEventArgs e) => WindowState = WindowState.Minimized;
 
         private void BtnMaximize_Click(object sender, RoutedEventArgs e)
-        {
-            WindowState = WindowState == WindowState.Maximized ? WindowState.Normal : WindowState.Maximized;
-        }
+            => WindowState = WindowState == WindowState.Maximized ? WindowState.Normal : WindowState.Maximized;
 
-        private void BtnClose_Click(object sender, RoutedEventArgs e)
-        {
-            Close();
-        }
+        private void BtnClose_Click(object sender, RoutedEventArgs e) => Close();
 
         private void BtnSettingsModal_Click(object sender, RoutedEventArgs e)
-        {
-            SettingsModalOverlay.Visibility = Visibility.Visible;
-        }
+            => SettingsModalOverlay.Visibility = Visibility.Visible;
 
         private void BtnCloseSettingsModal_Click(object sender, RoutedEventArgs e)
-        {
-            SettingsModalOverlay.Visibility = Visibility.Collapsed;
-        }
+            => SettingsModalOverlay.Visibility = Visibility.Collapsed;
 
         private void ChkMaxPerformance_Changed(object sender, RoutedEventArgs e)
         {
             if (ChkMaxPerformance == null) return;
-            
+
             bool isMaxPerformance = ChkMaxPerformance.IsChecked == true;
-            
+
             try
             {
-                if (isMaxPerformance)
-                {
-                    Process.GetCurrentProcess().PriorityClass = ProcessPriorityClass.BelowNormal;
-                }
-                else
-                {
-                    Process.GetCurrentProcess().PriorityClass = ProcessPriorityClass.Normal;
-                }
+                Process.GetCurrentProcess().PriorityClass = isMaxPerformance
+                    ? ProcessPriorityClass.BelowNormal
+                    : ProcessPriorityClass.Normal;
             }
             catch { }
-            
-            if (_streamManager != null)
-            {
-                _streamManager.SetMaxPerformanceMode(isMaxPerformance);
-            }
+
+            _hostStreamManager?.SetMaxPerformanceMode(isMaxPerformance);
         }
 
         private void GithubLink_Click(object sender, System.Windows.Input.MouseButtonEventArgs e)
@@ -965,5 +805,21 @@ namespace RadminStreamApp
             }
             catch { }
         }
+
+        protected override void OnClosed(EventArgs e)
+        {
+            _server?.Stop();
+            _hostStreamManager?.Stop();
+            foreach (var session in _sessions.ToList())
+            {
+                session.Dispose();
+            }
+            base.OnClosed(e);
+            Environment.Exit(0);
+        }
+
+        public event PropertyChangedEventHandler PropertyChanged;
+        private void OnPropertyChanged([CallerMemberName] string name = null)
+            => PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(name));
     }
 }

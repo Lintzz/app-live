@@ -6,19 +6,28 @@ using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
+using RadminStreamApp.Models;
 
 namespace RadminStreamApp
 {
+    /// <summary>
+    /// Uma live sendo assistida. Todo o caminho de viewer passa por aqui — tanto quando
+    /// há uma única stream aberta quanto quando há várias lado a lado.
+    /// </summary>
     public class ViewerSession : INotifyPropertyChanged, IDisposable
     {
-        public string FriendName { get; }
-        public string Ip { get; }
-        private readonly string _password;
+        public Friend Friend { get; }
+        public string Ip => Friend.Ip;
+        public string FriendName => Friend.DisplayName;
 
         private SignalingClient _client;
         private StreamManager _streamManager;
-        private float _volume = 1.0f;
-        private bool _showingSourceChangedMessage = false;
+        private string _password = string.Empty;
+        private bool _streamEnded;
+        private bool _disposed;
+
+        /// <summary>Disparado quando o host exige senha. bool = a senha anterior foi recusada.</summary>
+        public event Action<ViewerSession, bool> PasswordRequested = delegate {};
 
         public event PropertyChangedEventHandler PropertyChanged;
 
@@ -35,15 +44,55 @@ namespace RadminStreamApp
         public int Fps { get => _fps; private set { if (SetProperty(ref _fps, value)) RaisePropertyChanged(nameof(StatsText)); } }
 
         private int _latencyMs;
-        public int LatencyMs { get => _latencyMs; private set { if (SetProperty(ref _latencyMs, value)) RaisePropertyChanged(nameof(StatsText)); } }
+        public int LatencyMs
+        {
+            get => _latencyMs;
+            private set
+            {
+                if (SetProperty(ref _latencyMs, value))
+                {
+                    RaisePropertyChanged(nameof(StatsText));
+                    Friend.SessionInfo = $"{value}ms";
+                }
+            }
+        }
+
+        private double _volume = 100;
+        public double Volume
+        {
+            get => _volume;
+            set
+            {
+                if (SetProperty(ref _volume, value)) ApplyVolume();
+            }
+        }
+
+        private bool _isActive;
+        /// <summary>Sessão em foco: recebe o PiP, o controle de qualidade e o destaque na borda.</summary>
+        public bool IsActive { get => _isActive; set => SetProperty(ref _isActive, value); }
+
+        private bool _isMuted;
+        public bool IsMuted
+        {
+            get => _isMuted;
+            set
+            {
+                if (SetProperty(ref _isMuted, value))
+                {
+                    RaisePropertyChanged(nameof(MuteIcon));
+                    ApplyVolume();
+                }
+            }
+        }
+
+        /// <summary>Ícone Segoe MDL2: alto-falante normal ou mudo.</summary>
+        public string MuteIcon => IsMuted ? "" : "";
 
         public string StatsText => $"📥 {Fps}fps | {LatencyMs}ms";
 
-        public ViewerSession(string friendName, string ip, string password)
+        public ViewerSession(Friend friend)
         {
-            FriendName = string.IsNullOrWhiteSpace(friendName) ? ip : friendName;
-            Ip = ip;
-            _password = password ?? string.Empty;
+            Friend = friend ?? throw new ArgumentNullException(nameof(friend));
         }
 
         public async Task ConnectAsync()
@@ -56,51 +105,59 @@ namespace RadminStreamApp
                 {
                     if (string.IsNullOrEmpty(_password))
                     {
-                        StatusText = "Sala requer senha";
-                        Disconnect();
+                        StatusText = "Esta sala pede senha";
+                        RaiseOnUi(() => PasswordRequested?.Invoke(this, false));
                     }
                     else
                     {
-                        var authMsg = new SignalingMessage { Type = "AUTH", Data = _password };
-                        _client.SendMessage(SignalingMessage.Serialize(authMsg));
+                        SendAuth();
                     }
                     return;
                 }
                 if (message == "AUTH_FAIL")
                 {
+                    _password = string.Empty;
                     StatusText = "Senha incorreta";
-                    Disconnect();
+                    RaiseOnUi(() => PasswordRequested?.Invoke(this, true));
                     return;
                 }
                 if (message == "AUTH_OK")
                 {
                     _client.EnableEncryption(_password);
+                    StatusText = "Conectando...";
                     SendHello();
                     return;
                 }
                 if (message == "SOURCE_CHANGED")
                 {
-                    _showingSourceChangedMessage = true;
                     StatusText = "Host trocou de tela...";
-                    _ = ClearSourceChangedMessageAfterDelay();
                     return;
                 }
                 if (message == "STREAM_STOPPED")
                 {
+                    _streamEnded = true;
+                    _client?.SuppressReconnect();
                     try { _streamManager?.Stop(); } catch { }
-                    StatusText = "Transmissão Encerrada";
+                    VideoBitmap = null;
+                    StatusText = "Transmissão encerrada";
                     return;
                 }
                 if (message == "STREAM_STARTED")
                 {
+                    _streamEnded = false;
+                    _client?.AllowReconnect();
                     await SetupStreamManagerAsync();
                     SendHello();
                     return;
                 }
+
                 var parsed = SignalingMessage.Deserialize(message);
                 if (parsed != null && parsed.Type == "STATUS_RESPONSE")
                 {
-                    if (parsed.Data == "IDLE") StatusText = "Host não está em live";
+                    if (parsed.Data == "IDLE" && !_streamEnded)
+                    {
+                        StatusText = $"{FriendName} não está em live";
+                    }
                     return;
                 }
 
@@ -114,9 +171,11 @@ namespace RadminStreamApp
             {
                 if (isReconnect)
                 {
+                    _streamEnded = false;
                     StatusText = "Reconectado!";
                     await SetupStreamManagerAsync();
                 }
+                SendStatusCheck();
                 SendHello();
             };
 
@@ -128,22 +187,46 @@ namespace RadminStreamApp
             await _client.StartAsync(Ip, 8080);
 
             IsConnected = true;
-            StatusText = "Conectado, aguardando vídeo...";
+            Friend.IsWatching = true;
+            if (StatusText == "Conectando...") StatusText = "Conectado, aguardando vídeo...";
         }
 
-        private async Task ClearSourceChangedMessageAfterDelay()
+        /// <summary>Senha informada pelo usuário no modal.</summary>
+        public void SubmitPassword(string password)
         {
-            await Task.Delay(2000);
-            _showingSourceChangedMessage = false;
-            if (StatusText == "Host trocou de tela...") StatusText = string.Empty;
+            _password = password ?? string.Empty;
+            SendAuth();
+        }
+
+        /// <summary>Usuário cancelou o modal de senha: encerra a sessão.</summary>
+        public void CancelPassword()
+        {
+            StatusText = "Senha necessária";
+            Disconnect();
+        }
+
+        private void SendAuth()
+        {
+            var authMsg = new SignalingMessage { Type = "AUTH", Data = _password };
+            _client?.SendMessage(SignalingMessage.Serialize(authMsg));
+        }
+
+        private void SendStatusCheck()
+        {
+            var statusMsg = new SignalingMessage { Type = "STATUS_CHECK" };
+            _client?.SendMessage(SignalingMessage.Serialize(statusMsg));
         }
 
         private void SendHello()
         {
-            var statusMsg = new SignalingMessage { Type = "STATUS_CHECK" };
-            _client?.SendMessage(SignalingMessage.Serialize(statusMsg));
             var helloMsg = new SignalingMessage { Type = "CLIENT_CONNECTED", Data = "", SenderId = "client" };
             _client?.SendMessage(SignalingMessage.Serialize(helloMsg));
+        }
+
+        public void SetQuality(string quality)
+        {
+            var msg = new SignalingMessage { Type = "SET_QUALITY", Data = quality, SenderId = "client" };
+            _client?.SendMessage(SignalingMessage.Serialize(msg));
         }
 
         private async Task SetupStreamManagerAsync()
@@ -154,16 +237,19 @@ namespace RadminStreamApp
             }
 
             _streamManager = new StreamManager();
-            _streamManager.SetVolume(_volume);
+            ApplyVolume();
 
             _streamManager.OnVideoFrameDecoded += (pixelData, width, height, stride) =>
             {
                 UpdateBitmap(pixelData, width, height);
-                if (!_showingSourceChangedMessage) StatusText = string.Empty;
+                if (!_streamEnded) StatusText = string.Empty;
             };
 
             _streamManager.OnConnectionStateChanged += (state) =>
             {
+                // Depois de "Transmissão encerrada" o WebRTC ainda emite closed/failed;
+                // sobrescrever aqui faria o usuário ver um erro no lugar do aviso real.
+                if (_streamEnded) return;
                 StatusText = $"WebRTC: {state}";
             };
 
@@ -192,16 +278,17 @@ namespace RadminStreamApp
             });
         }
 
-        public void SetVolume(float volume)
+        private void ApplyVolume()
         {
-            _volume = volume;
-            _streamManager?.SetVolume(volume);
+            _streamManager?.SetVolume(IsMuted ? 0f : (float)(_volume / 100.0));
         }
 
-        public void SetQuality(string quality)
+        public void ToggleMute() => IsMuted = !IsMuted;
+
+        /// <summary>O PiP manda 0..2 (slider de 0 a 200%); aqui vira a mesma escala do Volume.</summary>
+        public void SetVolumeFromPip(float value)
         {
-            var msg = new SignalingMessage { Type = "SET_QUALITY", Data = quality, SenderId = "client" };
-            _client?.SendMessage(SignalingMessage.Serialize(msg));
+            Volume = Math.Max(0, Math.Min(200, value * 100.0));
         }
 
         public void Disconnect()
@@ -209,9 +296,23 @@ namespace RadminStreamApp
             try { _client?.Stop(); } catch { }
             try { _streamManager?.Stop(); } catch { }
             IsConnected = false;
+            Friend.IsWatching = false;
+            Friend.SessionInfo = null;
         }
 
-        public void Dispose() => Disconnect();
+        public void Dispose()
+        {
+            if (_disposed) return;
+            _disposed = true;
+            Disconnect();
+        }
+
+        private void RaiseOnUi(Action action)
+        {
+            var app = System.Windows.Application.Current;
+            if (app == null || app.Dispatcher.CheckAccess()) action();
+            else app.Dispatcher.InvokeAsync(action);
+        }
 
         private bool SetProperty<T>(ref T field, T value, [CallerMemberName] string name = null)
         {
