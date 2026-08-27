@@ -4,6 +4,10 @@ using System.Windows;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using System.Runtime.InteropServices;
+using System.Collections.ObjectModel;
+using System.Linq;
+using RadminStreamApp.Models;
+using RadminStreamApp.Services;
 
 namespace RadminStreamApp
 {
@@ -14,8 +18,15 @@ namespace RadminStreamApp
         private StreamManager _streamManager;
         private WriteableBitmap _writeableBitmap;
         private System.Windows.Threading.DispatcherTimer _mouseIdleTimer;
+        private System.Windows.Threading.DispatcherTimer _statusTimer;
 
         private string _downloadUrl;
+        private ObservableCollection<Friend> _friends;
+        private int _lastViewerFps = 0;
+        private int _lastLatencyMs = 0;
+        private PipWindow _activePip;
+        private ObservableCollection<ViewerSession> _watchPartySessions = new ObservableCollection<ViewerSession>();
+        private bool _showingSourceChangedMessage = false;
 
         public MainWindow()
         {
@@ -30,12 +41,87 @@ namespace RadminStreamApp
 
         private async void MainWindow_Loaded(object sender, RoutedEventArgs e)
         {
+            _friends = new ObservableCollection<Friend>(FriendsService.LoadFriends());
+            CboFriends.ItemsSource = _friends;
+            LstWatchPartyFriends.ItemsSource = _friends;
+            TabWatchParty.ItemsSource = _watchPartySessions;
+            GridWatchParty.ItemsSource = _watchPartySessions;
+
             var updateResult = await UpdateManager.CheckForUpdatesAsync();
             if (updateResult.HasUpdate)
             {
                 _downloadUrl = updateResult.DownloadUrl;
                 UpdateBannerText.Text = $"Uma nova versão ({updateResult.LatestVersion}) está disponível!";
                 UpdateBanner.Visibility = Visibility.Visible;
+            }
+
+            StartStatusTimer();
+        }
+
+        private void StartStatusTimer()
+        {
+            _statusTimer = new System.Windows.Threading.DispatcherTimer();
+            _statusTimer.Interval = TimeSpan.FromSeconds(10);
+            _statusTimer.Tick += async (s, ev) => {
+                foreach (var friend in _friends.ToList())
+                {
+                    await CheckFriendStatusAsync(friend);
+                }
+            };
+            _statusTimer.Start();
+            
+            foreach (var friend in _friends.ToList())
+            {
+                _ = CheckFriendStatusAsync(friend);
+            }
+        }
+
+        private async System.Threading.Tasks.Task CheckFriendStatusAsync(Friend friend)
+        {
+            try
+            {
+                using var tcpClient = new System.Net.Sockets.TcpClient();
+                var connectTask = tcpClient.ConnectAsync(friend.Ip, 8080);
+                if (await System.Threading.Tasks.Task.WhenAny(connectTask, System.Threading.Tasks.Task.Delay(1000)) != connectTask)
+                {
+                    friend.IsOnline = false;
+                    friend.IsStreaming = false;
+                    return;
+                }
+                
+                friend.IsOnline = true;
+                
+                using var ws = new System.Net.WebSockets.ClientWebSocket();
+                var wsConnectTask = ws.ConnectAsync(new Uri($"ws://{friend.Ip}:8080"), System.Threading.CancellationToken.None);
+                if (await System.Threading.Tasks.Task.WhenAny(wsConnectTask, System.Threading.Tasks.Task.Delay(1000)) != wsConnectTask)
+                {
+                    friend.IsStreaming = false;
+                    return;
+                }
+                
+                var checkMsg = new SignalingMessage { Type = "STATUS_CHECK" };
+                var bytes = System.Text.Encoding.UTF8.GetBytes(System.Text.Json.JsonSerializer.Serialize(checkMsg));
+                await ws.SendAsync(new ArraySegment<byte>(bytes), System.Net.WebSockets.WebSocketMessageType.Text, true, System.Threading.CancellationToken.None);
+                
+                var buffer = new byte[1024];
+                var receiveTask = ws.ReceiveAsync(new ArraySegment<byte>(buffer), System.Threading.CancellationToken.None);
+                if (await System.Threading.Tasks.Task.WhenAny(receiveTask, System.Threading.Tasks.Task.Delay(1000)) == receiveTask)
+                {
+                    var result = receiveTask.Result;
+                    var responseText = System.Text.Encoding.UTF8.GetString(buffer, 0, result.Count);
+                    var responseMsg = SignalingMessage.Deserialize(responseText);
+                    if (responseMsg != null && responseMsg.Type == "STATUS_RESPONSE")
+                    {
+                        friend.IsStreaming = (responseMsg.Data == "STREAMING");
+                    }
+                }
+                
+                try { await ws.CloseAsync(System.Net.WebSockets.WebSocketCloseStatus.NormalClosure, "", System.Threading.CancellationToken.None); } catch { }
+            }
+            catch
+            {
+                friend.IsOnline = false;
+                friend.IsStreaming = false;
             }
         }
 
@@ -60,6 +146,16 @@ namespace RadminStreamApp
             CboWindows.ItemsSource = WindowHelper.GetCapturableWindows();
         }
 
+        private void CboWindows_SelectionChanged(object sender, System.Windows.Controls.SelectionChangedEventArgs e)
+        {
+            if (_streamManager != null && BtnStopStream.IsEnabled && CboWindows.SelectedItem is CaptureSource selectedSource)
+            {
+                _streamManager.SetTargetSource(selectedSource);
+                _streamManager.ForceKeyFrame();
+                _server?.BroadcastMessage("SOURCE_CHANGED");
+            }
+        }
+
         private void SliderVolume_ValueChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
         {
             if (_streamManager != null)
@@ -72,17 +168,22 @@ namespace RadminStreamApp
         {
             BtnClient.Visibility = Visibility.Visible;
             BtnClient.IsEnabled = true;
+            BtnWatchParty.IsEnabled = true;
             BtnHost.IsEnabled = false;
 
             PanelHost.Visibility = Visibility.Visible;
             PanelClient.Visibility = Visibility.Collapsed;
-            
+            PanelWatchParty.Visibility = Visibility.Collapsed;
+            WatchPartyArea.Visibility = Visibility.Collapsed;
+            VideoBorder.Visibility = Visibility.Visible;
+
             IconVolume.Visibility = Visibility.Collapsed;
             SliderVolume.Visibility = Visibility.Collapsed;
             BtnSettings.Visibility = Visibility.Collapsed;
+            BtnPip.Visibility = Visibility.Collapsed;
             BtnTheater.Visibility = Visibility.Collapsed;
             BtnFullscreen.Visibility = Visibility.Collapsed;
-            
+
             CboWindows.ItemsSource = WindowHelper.GetCapturableWindows();
 
             if (_server == null)
@@ -95,6 +196,7 @@ namespace RadminStreamApp
                     });
                 };
                 _server.OnClientDisconnected += (socket) => {
+                    _streamManager?.RemoveClient(socket.ConnectionInfo.Id.ToString());
                     System.Windows.Application.Current.Dispatcher.Invoke(() => {
                         UpdateViewerCount();
                     });
@@ -123,29 +225,146 @@ namespace RadminStreamApp
         {
             BtnHost.Visibility = Visibility.Visible;
             BtnHost.IsEnabled = true;
+            BtnWatchParty.IsEnabled = true;
             BtnClient.IsEnabled = false;
 
             PanelHost.Visibility = Visibility.Collapsed;
             PanelClient.Visibility = Visibility.Visible;
-            
+            PanelWatchParty.Visibility = Visibility.Collapsed;
+            WatchPartyArea.Visibility = Visibility.Collapsed;
+            VideoBorder.Visibility = Visibility.Visible;
+
             IconVolume.Visibility = Visibility.Visible;
             SliderVolume.Visibility = Visibility.Visible;
             BtnSettings.Visibility = Visibility.Visible;
+            BtnPip.Visibility = Visibility.Visible;
             BtnTheater.Visibility = Visibility.Visible;
             BtnFullscreen.Visibility = Visibility.Visible;
         }
 
+        private void BtnWatchParty_Click(object sender, RoutedEventArgs e)
+        {
+            BtnHost.Visibility = Visibility.Visible;
+            BtnHost.IsEnabled = true;
+            BtnClient.Visibility = Visibility.Visible;
+            BtnClient.IsEnabled = true;
+            BtnWatchParty.IsEnabled = false;
+
+            PanelHost.Visibility = Visibility.Collapsed;
+            PanelClient.Visibility = Visibility.Collapsed;
+            PanelWatchParty.Visibility = Visibility.Visible;
+
+            IconVolume.Visibility = Visibility.Collapsed;
+            SliderVolume.Visibility = Visibility.Collapsed;
+            BtnSettings.Visibility = Visibility.Collapsed;
+            BtnPip.Visibility = Visibility.Collapsed;
+            BtnTheater.Visibility = Visibility.Collapsed;
+            BtnFullscreen.Visibility = Visibility.Collapsed;
+
+            VideoBorder.Visibility = Visibility.Collapsed;
+            WatchPartyArea.Visibility = Visibility.Visible;
+        }
+
+        private async void BtnConnectWatchParty_Click(object sender, RoutedEventArgs e)
+        {
+            var selected = LstWatchPartyFriends.SelectedItems.Cast<Friend>().ToList();
+            if (selected.Count == 0)
+            {
+                System.Windows.MessageBox.Show("Selecione ao menos um amigo na lista.");
+                return;
+            }
+
+            string password = TxtWatchPartyPassword.Text;
+            foreach (var friend in selected)
+            {
+                if (_watchPartySessions.Any(s => s.Ip == friend.Ip)) continue;
+
+                var session = new ViewerSession(friend.Name, friend.Ip, password);
+                _watchPartySessions.Add(session);
+                TabWatchParty.SelectedItem = session;
+
+                try
+                {
+                    await session.ConnectAsync();
+                }
+                catch (Exception ex)
+                {
+                    System.Windows.MessageBox.Show($"Erro ao conectar com {friend.Name}: {ex.Message}");
+                    _watchPartySessions.Remove(session);
+                }
+            }
+        }
+
+        private void StreamTab_OnCloseRequested(ViewerSession session)
+        {
+            session.Disconnect();
+            _watchPartySessions.Remove(session);
+        }
+
+        private void ToggleGridView_Changed(object sender, RoutedEventArgs e)
+        {
+            bool gridMode = ToggleGridView.IsChecked == true;
+            TabWatchParty.Visibility = gridMode ? Visibility.Collapsed : Visibility.Visible;
+            GridWatchParty.Visibility = gridMode ? Visibility.Visible : Visibility.Collapsed;
+        }
+
         private async void BtnConnect_Click(object sender, RoutedEventArgs e)
         {
-            string ip = TxtHostIp.Text;
+            string ip = CboFriends.Text;
             if (string.IsNullOrWhiteSpace(ip)) return;
 
             if (_client == null)
             {
                 _client = new SignalingClient();
-                _streamManager = new StreamManager();
-                
+
                 _client.OnMessageReceived += async (message) => {
+                    if (message == "AUTH_REQUIRED")
+                    {
+                        var pwd = "";
+                        System.Windows.Application.Current.Dispatcher.Invoke(() => { pwd = TxtClientPassword.Text; });
+                        if (string.IsNullOrEmpty(pwd))
+                        {
+                            System.Windows.Application.Current.Dispatcher.Invoke(() => {
+                                System.Windows.MessageBox.Show("Esta sala requer uma senha. Preencha o campo de Senha e tente novamente.");
+                                BtnDisconnect_Click(null, null);
+                            });
+                        }
+                        else
+                        {
+                            var authMsg = new SignalingMessage { Type = "AUTH", Data = pwd };
+                            _client.SendMessage(System.Text.Json.JsonSerializer.Serialize(authMsg));
+                        }
+                        return;
+                    }
+                    if (message == "AUTH_FAIL")
+                    {
+                        System.Windows.Application.Current.Dispatcher.Invoke(() => {
+                            System.Windows.MessageBox.Show("Senha incorreta!");
+                            BtnDisconnect_Click(null, null);
+                        });
+                        return;
+                    }
+                    if (message == "AUTH_OK")
+                    {
+                        System.Windows.Application.Current.Dispatcher.Invoke(() => {
+                            _client.EnableEncryption(TxtClientPassword.Text);
+                            var helloMsg = new SignalingMessage { Type = "CLIENT_CONNECTED", Data = "", SenderId = "client" };
+                            _client.SendMessage(System.Text.Json.JsonSerializer.Serialize(helloMsg));
+                        });
+                        return;
+                    }
+                    if (message == "SOURCE_CHANGED")
+                    {
+                        System.Windows.Application.Current.Dispatcher.InvokeAsync(async () => {
+                            _showingSourceChangedMessage = true;
+                            StatusText.Text = "Host trocou de tela...";
+                            StatusText.Visibility = Visibility.Visible;
+                            await System.Threading.Tasks.Task.Delay(2000);
+                            _showingSourceChangedMessage = false;
+                            if (_streamManager != null) StatusText.Visibility = Visibility.Collapsed;
+                        });
+                        return;
+                    }
                     if (message == "STREAM_STOPPED")
                     {
                         System.Windows.Application.Current.Dispatcher.Invoke(() => {
@@ -153,95 +372,145 @@ namespace RadminStreamApp
                             VideoPlayer.Source = null;
                             StatusText.Text = "Transmissão Encerrada";
                             StatusText.Visibility = Visibility.Visible;
+                            StatsOverlay.Visibility = Visibility.Collapsed;
                         });
                         return;
                     }
                     if (message == "STREAM_STARTED")
                     {
                         System.Windows.Application.Current.Dispatcher.Invoke(async () => {
-                            if (_streamManager != null)
-                            {
-                                try { _streamManager.Stop(); } catch { }
-                            }
-                            
-                            _streamManager = new StreamManager();
-                            
-                            _streamManager.OnVideoFrameDecoded += (pixelData, width, height, stride) => {
-                                StreamManager_OnVideoFrameDecoded(pixelData, width, height, stride);
-                                System.Windows.Application.Current.Dispatcher.InvokeAsync(() => {
-                                    StatusText.Visibility = Visibility.Collapsed;
-                                });
-                            };
-
-                            _streamManager.OnConnectionStateChanged += (state) => {
-                                System.Windows.Application.Current.Dispatcher.InvokeAsync(() => {
-                                    if (StatusText.Text == "Transmissão Encerrada" && (state.ToString() == "closed" || state.ToString() == "disconnected" || state.ToString() == "failed")) return;
-                                    StatusText.Text = $"WebRTC: {state}";
-                                    StatusText.Visibility = Visibility.Visible;
-                                });
-                            };
-
-                            _streamManager.OnLocalSdpReady += (clientId, sdpJson) => {
-                                _client?.SendMessage(sdpJson);
-                            };
-                            
-                            _streamManager.SetVolume((float)SliderVolume.Value / 100f);
-
-                            await _streamManager.InitializeClient();
+                            await SetupClientStreamManagerAsync();
                             var msg = new SignalingMessage { Type = "CLIENT_CONNECTED", Data = "", SenderId = "client" };
                             _client.SendMessage(System.Text.Json.JsonSerializer.Serialize(msg));
                         });
                         return;
                     }
+                    var parsed = SignalingMessage.Deserialize(message);
+                    if (parsed != null && parsed.Type == "STATUS_RESPONSE")
+                    {
+                        if (parsed.Data == "IDLE")
+                        {
+                            System.Windows.Application.Current.Dispatcher.Invoke(() => {
+                                StatusText.Text = "Host não está em live";
+                                StatusText.Visibility = Visibility.Visible;
+                            });
+                        }
+                        return;
+                    }
+
                     if (_streamManager != null)
                         await _streamManager.HandleSignalingMessage("host", message);
                 };
-                
+
                 _client.OnBinaryReceived += (data) => {
-                    _streamManager.ProcessReceivedBinary(data);
+                    _streamManager?.ProcessReceivedBinary(data);
                 };
 
-                // Sync initial volume
-                _streamManager.SetVolume((float)SliderVolume.Value / 100f);
-
-                _streamManager.OnVideoFrameDecoded += (pixelData, width, height, stride) => {
-                    StreamManager_OnVideoFrameDecoded(pixelData, width, height, stride);
-                    System.Windows.Application.Current.Dispatcher.InvokeAsync(() => {
-                        StatusText.Visibility = Visibility.Collapsed;
+                _client.OnConnected += (isReconnect) => {
+                    System.Windows.Application.Current.Dispatcher.Invoke(async () => {
+                        if (isReconnect)
+                        {
+                            StatusText.Text = "Reconectado!";
+                            StatusText.Visibility = Visibility.Visible;
+                            await SetupClientStreamManagerAsync();
+                            _ = HideStatusTextAfterDelay(2000);
+                        }
+                        var statusMsg = new SignalingMessage { Type = "STATUS_CHECK" };
+                        _client.SendMessage(System.Text.Json.JsonSerializer.Serialize(statusMsg));
+                        var helloMsg = new SignalingMessage { Type = "CLIENT_CONNECTED", Data = "", SenderId = "client" };
+                        _client.SendMessage(System.Text.Json.JsonSerializer.Serialize(helloMsg));
                     });
                 };
 
-                _streamManager.OnConnectionStateChanged += (state) => {
-                    System.Windows.Application.Current.Dispatcher.InvokeAsync(() => {
-                        if (StatusText.Text == "Transmissão Encerrada" && (state.ToString() == "closed" || state.ToString() == "disconnected" || state.ToString() == "failed")) return;
-                        StatusText.Text = $"WebRTC: {state}";
+                _client.OnReconnecting += (attempt) => {
+                    System.Windows.Application.Current.Dispatcher.Invoke(() => {
+                        StatusText.Text = $"Reconectando... ({attempt}/10)";
                         StatusText.Visibility = Visibility.Visible;
                     });
                 };
 
-                _streamManager.OnLocalSdpReady += (clientId, sdpJson) => {
-                    _client?.SendMessage(sdpJson);
+                _client.OnReconnectFailed += () => {
+                    System.Windows.Application.Current.Dispatcher.Invoke(() => {
+                        System.Windows.MessageBox.Show("Não foi possível reconectar ao host.");
+                        BtnDisconnect_Click(null, null);
+                    });
                 };
-                
+
+                _client.OnLatencyUpdated += (ms) => {
+                    _lastLatencyMs = ms;
+                    System.Windows.Application.Current.Dispatcher.InvokeAsync(UpdateViewerStatsOverlay);
+                };
+
                 try
                 {
-                    await _streamManager.InitializeClient();
+                    await SetupClientStreamManagerAsync();
                     await _client.StartAsync(ip, 8080);
-                    
-                    var helloMsg = new SignalingMessage { Type = "CLIENT_CONNECTED", Data = "", SenderId = "client" };
-                    _client.SendMessage(System.Text.Json.JsonSerializer.Serialize(helloMsg));
 
                     BtnConnect.Content = "Connected";
                     BtnConnect.IsEnabled = false;
                     BtnDisconnect.IsEnabled = true;
-                    TxtHostIp.IsEnabled = false;
+                    CboFriends.IsEnabled = false;
+                    BtnAddFriend.IsEnabled = false;
+                    BtnRemoveFriend.IsEnabled = false;
                     BtnHost.Visibility = Visibility.Collapsed;
                 }
                 catch (Exception ex)
                 {
                     System.Windows.MessageBox.Show($"Erro ao conectar: {ex.Message}");
+                    _client = null;
                 }
             }
+        }
+
+        private async System.Threading.Tasks.Task SetupClientStreamManagerAsync()
+        {
+            if (_streamManager != null)
+            {
+                try { _streamManager.Stop(); } catch { }
+            }
+
+            _streamManager = new StreamManager();
+            _streamManager.SetVolume((float)SliderVolume.Value / 100f);
+
+            _streamManager.OnVideoFrameDecoded += (pixelData, width, height, stride) => {
+                StreamManager_OnVideoFrameDecoded(pixelData, width, height, stride);
+                System.Windows.Application.Current.Dispatcher.InvokeAsync(() => {
+                    if (!_showingSourceChangedMessage) StatusText.Visibility = Visibility.Collapsed;
+                });
+            };
+
+            _streamManager.OnConnectionStateChanged += (state) => {
+                System.Windows.Application.Current.Dispatcher.InvokeAsync(() => {
+                    if (StatusText.Text == "Transmissão Encerrada" && (state.ToString() == "closed" || state.ToString() == "disconnected" || state.ToString() == "failed")) return;
+                    StatusText.Text = $"WebRTC: {state}";
+                    StatusText.Visibility = Visibility.Visible;
+                });
+            };
+
+            _streamManager.OnLocalSdpReady += (clientId, sdpJson) => {
+                _client?.SendMessage(sdpJson);
+            };
+
+            _streamManager.OnViewerFpsUpdated += (fps) => {
+                _lastViewerFps = fps;
+                System.Windows.Application.Current.Dispatcher.InvokeAsync(UpdateViewerStatsOverlay);
+            };
+
+            await _streamManager.InitializeClient();
+        }
+
+        private void UpdateViewerStatsOverlay()
+        {
+            StatsOverlay.Visibility = Visibility.Visible;
+            StatsText.Text = $"📥 {_lastViewerFps}fps | {_lastLatencyMs}ms";
+        }
+
+        private async System.Threading.Tasks.Task HideStatusTextAfterDelay(int delayMs)
+        {
+            await System.Threading.Tasks.Task.Delay(delayMs);
+            System.Windows.Application.Current.Dispatcher.Invoke(() => {
+                if (_streamManager != null) StatusText.Visibility = Visibility.Collapsed;
+            });
         }
 
         private void StreamManager_OnLocalVideoFrameReady(byte[] pixelData, int width, int height, int stride)
@@ -252,6 +521,7 @@ namespace RadminStreamApp
                 {
                     _writeableBitmap = new WriteableBitmap(width, height, 96, 96, PixelFormats.Bgr24, null);
                     VideoPlayer.Source = _writeableBitmap;
+                    _activePip?.SetBitmap(_writeableBitmap);
                 }
 
                 _writeableBitmap.Lock();
@@ -274,6 +544,7 @@ namespace RadminStreamApp
                 {
                     _writeableBitmap = new WriteableBitmap(width, height, 96, 96, PixelFormats.Bgr24, null);
                     VideoPlayer.Source = _writeableBitmap;
+                    _activePip?.SetBitmap(_writeableBitmap);
                 }
 
                 _writeableBitmap.Lock();
@@ -291,7 +562,6 @@ namespace RadminStreamApp
                 BtnStartStream.Content = "Streaming...";
                 BtnStartStream.IsEnabled = false;
                 BtnStopStream.IsEnabled = true;
-                CboWindows.IsEnabled = false;
                 BtnClient.Visibility = Visibility.Collapsed;
 
                 if (_streamManager != null)
@@ -311,22 +581,18 @@ namespace RadminStreamApp
                 
                 _streamManager.OnLocalSdpReady += (clientId, sdpJson) => {
                     if (_server == null) return;
-                    var clients = _server.GetType().GetField("_clients", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)?.GetValue(_server) as System.Collections.Generic.List<Fleck.IWebSocketConnection>;
-                    if (clients != null)
-                    {
-                        foreach (var client in clients)
-                        {
-                            if (client.ConnectionInfo.Id.ToString() == clientId || clientId == "host")
-                            {
-                                _server.SendMessage(client, sdpJson);
-                            }
-                        }
-                    }
+                    _server.SendToClient(clientId, sdpJson);
                 };
 
                 _streamManager.OnBinaryDataReady += (data) => {
                     _server?.BroadcastBinary(data);
                 };
+
+                if (_server != null)
+                {
+                    _server.RoomPassword = TxtRoomPassword.Text;
+                    _server.IsStreaming = true;
+                }
 
                 _streamManager.OnLocalVideoFrameReady += (pixelData, width, height, stride) => {
                     StreamManager_OnLocalVideoFrameReady(pixelData, width, height, stride);
@@ -342,7 +608,14 @@ namespace RadminStreamApp
                     });
                 };
 
-                await System.Threading.Tasks.Task.Run(() => 
+                _streamManager.OnHostStatsUpdated += (fps, kbps) => {
+                    System.Windows.Application.Current.Dispatcher.InvokeAsync(() => {
+                        StatsOverlay.Visibility = Visibility.Visible;
+                        StatsText.Text = $"📤 {fps}fps | {kbps:F1} kbps";
+                    });
+                };
+
+                await System.Threading.Tasks.Task.Run(() =>
                 {
                     _streamManager.SetTargetSource(selectedSource);
                     _streamManager.SetResolution(1920, 1080); // Forçar 1080p HD
@@ -359,7 +632,11 @@ namespace RadminStreamApp
 
         private void BtnStopStream_Click(object sender, RoutedEventArgs e)
         {
-            _server?.BroadcastMessage("STREAM_STOPPED");
+            if (_server != null)
+            {
+                _server.IsStreaming = false;
+                _server.BroadcastMessage("STREAM_STOPPED");
+            }
             if (_streamManager != null)
             {
                 try { _streamManager.Stop(); } catch { }
@@ -374,25 +651,66 @@ namespace RadminStreamApp
             _writeableBitmap = null;
             StatusText.Text = "No Signal";
             StatusText.Visibility = Visibility.Visible;
+            StatsOverlay.Visibility = Visibility.Collapsed;
+        }
+
+        private void CboFriends_SelectionChanged(object sender, System.Windows.Controls.SelectionChangedEventArgs e)
+        {
+            if (CboFriends.SelectedItem is Friend friend)
+            {
+                // No action needed for text update since DisplayMemberPath is set or we handle it via binding
+            }
+        }
+
+        private void BtnAddFriend_Click(object sender, RoutedEventArgs e)
+        {
+            string ip = CboFriends.Text?.Trim();
+            if (string.IsNullOrWhiteSpace(ip)) return;
+
+            var dialog = new AddFriendDialog(ip) { Owner = this };
+            if (dialog.ShowDialog() == true)
+            {
+                string name = string.IsNullOrWhiteSpace(dialog.FriendName) ? ip : dialog.FriendName;
+                var friend = new Friend { Name = name, Ip = ip };
+                _friends.Add(friend);
+                FriendsService.SaveFriends(new System.Collections.Generic.List<Friend>(_friends));
+                CboFriends.SelectedItem = friend;
+                _ = CheckFriendStatusAsync(friend);
+            }
+        }
+
+        private void BtnRemoveFriend_Click(object sender, RoutedEventArgs e)
+        {
+            if (CboFriends.SelectedItem is Friend friend)
+            {
+                _friends.Remove(friend);
+                FriendsService.SaveFriends(new System.Collections.Generic.List<Friend>(_friends));
+            }
         }
 
         private void BtnDisconnect_Click(object sender, RoutedEventArgs e)
         {
             _client?.Stop();
             _streamManager?.Stop();
-            
+
             _client = null;
             _streamManager = null;
-            
+
+            _activePip?.Close();
+            _activePip = null;
+
             BtnConnect.Content = "Connect";
             BtnConnect.IsEnabled = true;
             BtnDisconnect.IsEnabled = false;
-            TxtHostIp.IsEnabled = true;
+            CboFriends.IsEnabled = true;
+            BtnAddFriend.IsEnabled = true;
+            BtnRemoveFriend.IsEnabled = true;
             BtnHost.Visibility = Visibility.Visible;
             VideoPlayer.Source = null;
             _writeableBitmap = null;
             StatusText.Text = "No Signal";
             StatusText.Visibility = Visibility.Visible;
+            StatsOverlay.Visibility = Visibility.Collapsed;
         }
         
         protected override void OnClosed(EventArgs e)
@@ -400,8 +718,33 @@ namespace RadminStreamApp
             _server?.Stop();
             _client?.Stop();
             _streamManager?.Stop();
+            foreach (var session in _watchPartySessions.ToList())
+            {
+                session.Dispose();
+            }
             base.OnClosed(e);
             Environment.Exit(0);
+        }
+
+        private void BtnPip_Click(object sender, RoutedEventArgs e)
+        {
+            if (_writeableBitmap == null) return;
+
+            if (_activePip == null)
+            {
+                _activePip = new PipWindow(_writeableBitmap, v => _streamManager?.SetVolume(v));
+                _activePip.OnRestoreRequested += () => {
+                    System.Windows.Application.Current.Dispatcher.Invoke(() => {
+                        WindowState = WindowState.Normal;
+                        Activate();
+                        _activePip?.Close();
+                    });
+                };
+                _activePip.Closed += (s, ev) => { _activePip = null; };
+                _activePip.Show();
+            }
+
+            WindowState = WindowState.Minimized;
         }
 
         private void BtnFullscreen_Click(object sender, RoutedEventArgs e)

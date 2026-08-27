@@ -37,7 +37,16 @@ namespace RadminStreamApp
         
         public event Action<string> OnAudioCaptureError;
         public event Action<string> OnConnectionStateChanged; // WebRTC connection state
-        
+
+        public event Action<int, double> OnHostStatsUpdated; // fps, kbps
+        public event Action<int> OnViewerFpsUpdated; // fps
+
+        private System.Threading.Timer _hostStatsTimer;
+        private System.Threading.Timer _viewerStatsTimer;
+        private int _statsEncodedFrames = 0;
+        private long _statsEncodedBytes = 0;
+        private int _statsDecodedFrames = 0;
+
         private WaveOutEvent _waveOut;
         private BufferedWaveProvider _waveProvider;
         private NAudio.Wave.SampleProviders.VolumeSampleProvider _volumeProvider;
@@ -108,6 +117,9 @@ namespace RadminStreamApp
 
                         if (encoded != null && encoded.Length > 0)
                         {
+                            System.Threading.Interlocked.Increment(ref _statsEncodedFrames);
+                            System.Threading.Interlocked.Add(ref _statsEncodedBytes, encoded.Length);
+
                             lock (_peerConnections)
                             {
                                 foreach (var pc in _peerConnections.Values)
@@ -223,12 +235,28 @@ namespace RadminStreamApp
             }
         }
 
+        public void ForceKeyFrame()
+        {
+            lock (_encoderLock)
+            {
+                try { _videoEncoder?.ForceKeyFrame(); } catch { }
+            }
+        }
+
         public Task InitializeHost()
         {
             InitEncoder();
             _isHost = true;
             _videoCapturer.StartVideo();
             _audioCapturer.StartAudio();
+
+            _hostStatsTimer = new System.Threading.Timer(_ =>
+            {
+                var fps = System.Threading.Interlocked.Exchange(ref _statsEncodedFrames, 0);
+                var bytes = System.Threading.Interlocked.Exchange(ref _statsEncodedBytes, 0);
+                OnHostStatsUpdated?.Invoke(fps, bytes * 8.0 / 1000.0);
+            }, null, 1000, 1000);
+
             return Task.CompletedTask;
         }
 
@@ -251,6 +279,13 @@ namespace RadminStreamApp
             
             // Client creates a single connection (to the host)
             CreatePeerConnection("host");
+
+            _viewerStatsTimer = new System.Threading.Timer(_ =>
+            {
+                var fps = System.Threading.Interlocked.Exchange(ref _statsDecodedFrames, 0);
+                OnViewerFpsUpdated?.Invoke(fps);
+            }, null, 1000, 1000);
+
             return Task.CompletedTask;
         }
 
@@ -297,6 +332,7 @@ namespace RadminStreamApp
                         var sample = samples.First();
                         if (sample.Sample != null)
                         {
+                            System.Threading.Interlocked.Increment(ref _statsDecodedFrames);
                             OnVideoFrameDecoded?.Invoke(sample.Sample, (int)sample.Width, (int)sample.Height, (int)(sample.Width * 3));
                         }
                     }
@@ -421,9 +457,25 @@ namespace RadminStreamApp
                 }
             }
         }
+        public void RemoveClient(string clientId)
+        {
+            lock (_peerConnections)
+            {
+                if (_peerConnections.TryGetValue(clientId, out var pc))
+                {
+                    try { pc.Close("Client disconnected"); } catch { }
+                    _peerConnections.Remove(clientId);
+                }
+            }
+        }
         
         public void Stop()
         {
+            _hostStatsTimer?.Dispose();
+            _hostStatsTimer = null;
+            _viewerStatsTimer?.Dispose();
+            _viewerStatsTimer = null;
+
             _videoCapturer?.CloseVideo();
             _audioCapturer?.CloseAudio();
             _waveOut?.Stop();

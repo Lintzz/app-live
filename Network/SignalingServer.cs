@@ -1,8 +1,8 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Linq;
 using Fleck;
-using SIPSorcery.Net;
 
 namespace RadminStreamApp
 {
@@ -10,14 +10,40 @@ namespace RadminStreamApp
     {
         private WebSocketServer _server;
         private List<IWebSocketConnection> _clients = new List<IWebSocketConnection>();
+        private readonly object _clientsLock = new object();
+        private HashSet<Guid> _authenticatedClients = new HashSet<Guid>();
+
+        public bool IsStreaming { get; set; } = false;
+        public string RoomPassword { get; set; } = string.Empty;
+
+        private byte[] EncryptionKey => string.IsNullOrEmpty(RoomPassword) ? null : CryptoHelper.DeriveKey(RoomPassword);
 
         public event Action<IWebSocketConnection, string> OnMessageReceived;
         public event Action<IWebSocketConnection, byte[]> OnBinaryReceived;
         public event Action<IWebSocketConnection> OnClientConnected;
         public event Action<IWebSocketConnection> OnClientDisconnected;
 
-        public int ConnectedClientsCount => _clients.Count;
-        public IReadOnlyList<IWebSocketConnection> Clients => _clients.AsReadOnly();
+        public int ConnectedClientsCount
+        {
+            get
+            {
+                lock (_clientsLock)
+                {
+                    return _clients.Count;
+                }
+            }
+        }
+
+        public IReadOnlyList<IWebSocketConnection> Clients
+        {
+            get
+            {
+                lock (_clientsLock)
+                {
+                    return _clients.ToList().AsReadOnly();
+                }
+            }
+        }
 
         public void Start(string ipAddress = "0.0.0.0", int port = 8080)
         {
@@ -27,26 +53,108 @@ namespace RadminStreamApp
                 socket.OnOpen = () =>
                 {
                     Debug.WriteLine($"[Server] Client connected: {socket.ConnectionInfo.ClientIpAddress}");
-                    _clients.Add(socket);
+                    lock (_clientsLock)
+                    {
+                        _clients.Add(socket);
+                    }
                     OnClientConnected?.Invoke(socket);
                 };
 
                 socket.OnClose = () =>
                 {
                     Debug.WriteLine($"[Server] Client disconnected: {socket.ConnectionInfo.ClientIpAddress}");
-                    _clients.Remove(socket);
+                    lock (_clientsLock)
+                    {
+                        _clients.Remove(socket);
+                        _authenticatedClients.Remove(socket.ConnectionInfo.Id);
+                    }
                     OnClientDisconnected?.Invoke(socket);
                 };
 
                 socket.OnMessage = message =>
                 {
                     Debug.WriteLine($"[Server] Message received from {socket.ConnectionInfo.ClientIpAddress}: {message.Substring(0, Math.Min(message.Length, 50))}...");
-                    OnMessageReceived?.Invoke(socket, message);
+
+                    var msgObj = SignalingMessage.Deserialize(message);
+                    if (msgObj != null)
+                    {
+                        if (msgObj.Type == "STATUS_CHECK")
+                        {
+                            var response = new SignalingMessage { Type = "STATUS_RESPONSE", Data = IsStreaming ? "STREAMING" : "IDLE" };
+                            socket.Send(SignalingMessage.Serialize(response));
+                            return;
+                        }
+
+                        if (msgObj.Type == "PING")
+                        {
+                            var pong = new SignalingMessage { Type = "PONG", Data = msgObj.Data };
+                            socket.Send(SignalingMessage.Serialize(pong));
+                            return;
+                        }
+
+                        if (!string.IsNullOrEmpty(RoomPassword) && msgObj.Type == "AUTH")
+                        {
+                            if (msgObj.Data == RoomPassword)
+                            {
+                                lock (_clientsLock) { _authenticatedClients.Add(socket.ConnectionInfo.Id); }
+                                socket.Send("AUTH_OK");
+                            }
+                            else
+                            {
+                                socket.Send("AUTH_FAIL");
+                            }
+                            return;
+                        }
+                    }
+
+                    if (!string.IsNullOrEmpty(RoomPassword))
+                    {
+                        bool isAuth;
+                        lock (_clientsLock) { isAuth = _authenticatedClients.Contains(socket.ConnectionInfo.Id); }
+                        if (!isAuth)
+                        {
+                            socket.Send("AUTH_REQUIRED");
+                            return;
+                        }
+                    }
+
+                    var plainMessage = message;
+                    var key = EncryptionKey;
+                    if (key != null)
+                    {
+                        var decrypted = CryptoHelper.TryDecryptText(message, key);
+                        if (decrypted != null) plainMessage = decrypted;
+                    }
+
+                    if (!ReferenceEquals(plainMessage, message))
+                    {
+                        var innerMsg = SignalingMessage.Deserialize(plainMessage);
+                        if (innerMsg != null && innerMsg.Type == "STATUS_CHECK")
+                        {
+                            var innerResponse = new SignalingMessage { Type = "STATUS_RESPONSE", Data = IsStreaming ? "STREAMING" : "IDLE" };
+                            socket.Send(SignalingMessage.Serialize(innerResponse));
+                            return;
+                        }
+                    }
+
+                    OnMessageReceived?.Invoke(socket, plainMessage);
                 };
 
                 socket.OnBinary = bytes =>
                 {
-                    OnBinaryReceived?.Invoke(socket, bytes);
+                    var plainBytes = bytes;
+                    var key = EncryptionKey;
+                    if (key != null)
+                    {
+                        bool isAuth;
+                        lock (_clientsLock) { isAuth = _authenticatedClients.Contains(socket.ConnectionInfo.Id); }
+                        if (isAuth)
+                        {
+                            var decrypted = CryptoHelper.TryDecryptBytes(bytes, key);
+                            if (decrypted != null) plainBytes = decrypted;
+                        }
+                    }
+                    OnBinaryReceived?.Invoke(socket, plainBytes);
                 };
             });
 
@@ -58,25 +166,64 @@ namespace RadminStreamApp
             client.Send(message);
         }
 
+        public void SendToClient(string clientId, string message)
+        {
+            IWebSocketConnection client;
+            lock (_clientsLock)
+            {
+                client = _clients.FirstOrDefault(c => c.ConnectionInfo.Id.ToString() == clientId);
+            }
+            if (client != null)
+            {
+                var key = EncryptionKey;
+                client.Send(key != null ? CryptoHelper.EncryptText(message, key) : message);
+            }
+        }
+
         public void BroadcastBinary(byte[] data)
         {
-            foreach (var client in _clients)
+            List<IWebSocketConnection> clientsCopy;
+            lock (_clientsLock)
             {
-                client.Send(data);
+                if (string.IsNullOrEmpty(RoomPassword))
+                    clientsCopy = _clients.ToList();
+                else
+                    clientsCopy = _clients.Where(c => _authenticatedClients.Contains(c.ConnectionInfo.Id)).ToList();
+            }
+            var key = EncryptionKey;
+            var payload = key != null ? CryptoHelper.EncryptBytes(data, key) : data;
+            foreach (var client in clientsCopy)
+            {
+                client.Send(payload);
             }
         }
 
         public void BroadcastMessage(string message)
         {
-            foreach (var client in _clients)
+            List<IWebSocketConnection> clientsCopy;
+            lock (_clientsLock)
             {
-                client.Send(message);
+                if (string.IsNullOrEmpty(RoomPassword))
+                    clientsCopy = _clients.ToList();
+                else
+                    clientsCopy = _clients.Where(c => _authenticatedClients.Contains(c.ConnectionInfo.Id)).ToList();
+            }
+            var key = EncryptionKey;
+            var payload = key != null ? CryptoHelper.EncryptText(message, key) : message;
+            foreach (var client in clientsCopy)
+            {
+                client.Send(payload);
             }
         }
 
         public void Stop()
         {
-            foreach (var client in _clients)
+            List<IWebSocketConnection> clientsCopy;
+            lock (_clientsLock)
+            {
+                clientsCopy = _clients.ToList();
+            }
+            foreach (var client in clientsCopy)
             {
                 client.Close();
             }
