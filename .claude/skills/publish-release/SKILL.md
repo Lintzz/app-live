@@ -20,10 +20,9 @@ Sempre que acionar esta skill, o agente deve executar as seguintes etapas rigoro
    - **Não edite mais `build/setup.iss` nem `MainWindow.xaml`**: o `AppVersion` do Inno sai do `build/version.iss`
      gerado pelo build, e o texto na tela vem de `AppInfo.Version` (lido do assembly).
 
-3. **Compilar para Validar**:
-   - Execute `.\.dotnet\dotnet.exe build RadminStreamLive.sln -c Release`.
-   - Se a compilação falhar, interrompa o processo e avise o usuário.
-   - A suíte de testes foi removida e será recriada; quando voltar, rode-a aqui antes de seguir.
+3. **Rodar os Testes**:
+   - Execute `.\.dotnet\dotnet.exe test RadminStreamLive.sln -c Release`.
+   - Se algum teste falhar, interrompa o processo e avise o usuário.
 
 4. **Gerar o Instalador**:
    - Invoque a skill `build-installer` (`/build-installer`) para ler as instruções, ou apenas rode os comandos de build do instalador.

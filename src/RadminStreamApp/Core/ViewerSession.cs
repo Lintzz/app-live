@@ -110,8 +110,13 @@ namespace RadminStreamApp
         {
             _client = new SignalingClient();
 
+            // Envolvido em try/catch porque é um handler assíncrono de evento: sem isto, uma
+            // falha aqui vira exceção não observada e chega no log global sem dizer de qual
+            // amigo veio.
             _client.OnMessageReceived += async (message) =>
             {
+              try
+              {
                 var authMsg = SignalingMessage.Deserialize(message);
                 if (authMsg != null && authMsg.Type == "AUTH_REQUIRED")
                 {
@@ -180,20 +185,32 @@ namespace RadminStreamApp
 
                 if (_streamManager != null)
                     await _streamManager.HandleSignalingMessage("host", message);
+              }
+              catch (Exception ex)
+              {
+                  StatusText = $"Erro na sessão de {FriendName}: {ex.Message}";
+              }
             };
 
             _client.OnBinaryReceived += (data) => _streamManager?.ProcessReceivedBinary(data);
 
             _client.OnConnected += async (isReconnect) =>
             {
-                if (isReconnect)
+                try
                 {
-                    _streamEnded = false;
-                    StatusText = "Reconectado!";
-                    await SetupStreamManagerAsync();
+                    if (isReconnect)
+                    {
+                        _streamEnded = false;
+                        StatusText = "Reconectado!";
+                        await SetupStreamManagerAsync();
+                    }
+                    SendStatusCheck();
+                    SendHello();
                 }
-                SendStatusCheck();
-                SendHello();
+                catch (Exception ex)
+                {
+                    StatusText = $"Falha ao (re)conectar em {FriendName}: {ex.Message}";
+                }
             };
 
             _client.OnReconnecting += (attempt) => StatusText = $"Reconectando... ({attempt}/10)";

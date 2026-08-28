@@ -16,6 +16,22 @@ namespace RadminStreamApp.Services
 
         /// <summary>Escolha de fábrica, aplicada quando ainda não há arquivo de configuração.</summary>
         public const string DefaultExcludedAudioProcessName = "Discord";
+
+        // As três opções abaixo viviam só nos CheckBox do XAML: valiam para a sessão e
+        // voltavam ao padrão a cada abertura. O caso que doía era o GDI — quem precisa dele
+        // precisa dele toda vez, e tinha de redescobrir a opção depois de cada reinício.
+
+        /// <summary>
+        /// Modo leve: preset de encoder mais rápido, escala por vizinho mais próximo e
+        /// prioridade de processo abaixo do normal. Ligado de fábrica, como sempre esteve.
+        /// </summary>
+        public bool LightweightMode { get; set; } = true;
+
+        /// <summary>Só IPs da lista de amigos conseguem conectar.</summary>
+        public bool RestrictToFriends { get; set; } = true;
+
+        /// <summary>Força o caminho GDI de captura, ignorando o Desktop Duplication.</summary>
+        public bool ForceGdiCapture { get; set; }
     }
 
     /// <summary>

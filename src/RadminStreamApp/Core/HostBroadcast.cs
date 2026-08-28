@@ -68,6 +68,7 @@ namespace RadminStreamApp
             manager.OnHostStatsUpdated += (fps, kbps) => StatsUpdated?.Invoke(fps, kbps);
             manager.OnAudioStatsUpdated += (frames) => AudioStatsUpdated?.Invoke(frames);
             manager.OnBinaryDataReady += (data) => BinaryAudioReady?.Invoke(data);
+            manager.HasAudioListeners = () => _server?.HasBroadcastTargets == true;
 
             if (_server != null)
             {

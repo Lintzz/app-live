@@ -1,5 +1,4 @@
 using System;
-using System.Net.Sockets;
 using System.Net.WebSockets;
 using System.Text;
 using System.Threading;
@@ -31,22 +30,22 @@ namespace RadminStreamApp.Services
 
             try
             {
-                using var tcpClient = new TcpClient();
-                var connectTask = tcpClient.ConnectAsync(ip, port);
-                if (await Task.WhenAny(connectTask, Task.Delay(ConnectTimeout)) != connectTask)
-                {
-                    Observe(connectTask);
-                    return FriendStatus.Offline;
-                }
-
-                // TCP respondeu: o app está de pé. Falta saber se há transmissão.
+                // Uma conexão por sondagem, não duas. Antes abríamos um TcpClient só para
+                // descobrir se a porta respondia e, logo depois, um ClientWebSocket para a
+                // mesma porta — dois handshakes por amigo a cada 5s. O próprio handshake do
+                // WebSocket já responde à pergunta "o app está de pé?": se ele completa, está.
                 using var ws = new ClientWebSocket();
                 var wsConnectTask = ws.ConnectAsync(new Uri($"ws://{ip}:{port}"), CancellationToken.None);
                 if (await Task.WhenAny(wsConnectTask, Task.Delay(ConnectTimeout)) != wsConnectTask)
                 {
                     Observe(wsConnectTask);
-                    return new FriendStatus(IsOnline: true, IsStreaming: false);
+                    return FriendStatus.Offline;
                 }
+
+                // Uma conexão recusada (amigo offline, ou você fora da lista dele) faz o
+                // ConnectAsync falhar — a task já completou, então await propaga a exceção
+                // para o catch abaixo em vez de nos deixar afirmar que ele está online.
+                await wsConnectTask;
 
                 bool isStreaming = await ReadStatusAsync(ws);
 

@@ -27,3 +27,6 @@ jobs:
 
       - name: Compilar (Release)
         run: dotnet build RadminStreamLive.sln -c Release --no-restore
+
+      - name: Rodar testes
+        run: dotnet test RadminStreamLive.sln -c Release --no-build --verbosity normal

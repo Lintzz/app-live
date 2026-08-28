@@ -1,10 +1,13 @@
 using System;
 using NAudio.Wave;
-using SIPSorceryMedia.Abstractions;
 
 namespace RadminStreamApp
 {
-    public class AudioCapturer : IAudioSource, IDisposable
+    /// <remarks>
+    /// Não implementa <c>IAudioSource</c>: o PCM sai por <see cref="OnAudioFrameReady"/> e é
+    /// difundido pelo WebSocket, nunca pela interface. Ela só trazia membros stub vazios.
+    /// </remarks>
+    public class AudioCapturer : IDisposable
     {
         /// <summary>Taxa do PCM difundido pelo WebSocket.</summary>
         public const int SampleRate = 44100;
@@ -89,15 +92,13 @@ namespace RadminStreamApp
         /// </summary>
         public event Action<string>? OnCaptureError;
 
-        public System.Threading.Tasks.Task StartAudio()
+        public void StartAudio()
         {
             lock (_captureLock)
             {
                 StartCaptureLocked();
                 _started = true;
             }
-
-            return System.Threading.Tasks.Task.CompletedTask;
         }
 
         /// <summary>Fecha e reabre a captura para o alvo atual valer imediatamente.</summary>
@@ -182,15 +183,13 @@ namespace RadminStreamApp
             }
         }
 
-        public System.Threading.Tasks.Task CloseAudio()
+        public void CloseAudio()
         {
             lock (_captureLock)
             {
                 _started = false;
                 StopCaptureLocked();
             }
-
-            return System.Threading.Tasks.Task.CompletedTask;
         }
 
         private void StopCaptureLocked()
@@ -205,28 +204,14 @@ namespace RadminStreamApp
             try { _loopbackCapture?.StopRecording(); } catch { }
         }
 
-        public System.Threading.Tasks.Task PauseAudio() { return System.Threading.Tasks.Task.CompletedTask; }
-        public System.Threading.Tasks.Task ResumeAudio() { return System.Threading.Tasks.Task.CompletedTask; }
-        
-        public void ExternalAudioSourceRawSample(AudioSamplingRatesEnum samplingRate, uint durationMilliseconds, short[] sample) { }
-
-        public bool HasEncodedAudioSubscribers() => false;
-        public bool IsAudioSourcePaused() => false;
-        public void RestrictFormats(Func<AudioFormat, bool> filter) { }
-        public System.Collections.Generic.List<AudioFormat> GetAudioSourceFormats() => new System.Collections.Generic.List<AudioFormat>();
-        public void SetAudioSourceFormat(AudioFormat audioFormat) { }
-
-        public event EncodedSampleDelegate OnAudioSourceEncodedSample = delegate {};
-        // Exigido pelo IAudioSource a partir do SIPSorcery 8.0.12. Como o áudio é entregue
-        // manualmente ao WebRTC (e não por esta interface), o stub basta.
-        public event Action<EncodedAudioFrame> OnAudioSourceEncodedFrameReady = delegate {};
-        public event RawAudioSampleDelegate OnAudioSourceRawSample = delegate {};
-        public event SourceErrorDelegate OnAudioSourceError = delegate {};
         public event Action<byte[]>? OnAudioFrameReady;
 
         public void Dispose()
         {
-            _processAudioCapturer?.Dispose();
+            // Para a captura antes de soltar os objetos: descartar o loopback com o WASAPI
+            // ainda gravando deixa o callback rodando sobre um resampler já liberado.
+            CloseAudio();
+
             _resampler?.Dispose();
             _loopbackCapture?.Dispose();
         }

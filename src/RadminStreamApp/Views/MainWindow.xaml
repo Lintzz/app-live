@@ -717,13 +717,17 @@
                         <TabItem Header="Settings" FontSize="14" FontWeight="SemiBold">
                             <Grid Margin="10,20,10,10">
                                 <StackPanel>
-                                    <CheckBox x:Name="ChkMaxPerformance" Content="Modo de Desempenho Máximo (Menos uso de CPU)" Foreground="White" FontSize="14" IsChecked="True" Checked="ChkMaxPerformance_Changed" Unchecked="ChkMaxPerformance_Changed"/>
+                                    <CheckBox x:Name="ChkMaxPerformance" Content="Modo leve (usa menos CPU)" Foreground="White" FontSize="14" IsChecked="True" Checked="ChkMaxPerformance_Changed" Unchecked="ChkMaxPerformance_Changed"/>
+                                    <TextBlock Foreground="#8A8A94" FontSize="11" Margin="26,4,0,0" TextWrapping="Wrap"
+                                               Text="Codifica mais rápido, usa escala mais simples e cede prioridade de CPU aos outros programas. Desligue para uma imagem um pouco melhor, ao custo de mais CPU."/>
                                     <TextBlock Text="Ativar esta opção diminui a prioridade do aplicativo para garantir que seus jogos rodem com mais FPS, além de otimizar os cálculos da transmissão." Foreground="#AAAAAA" FontSize="12" TextWrapping="Wrap" Margin="20,5,0,0"/>
 
                                     <CheckBox x:Name="ChkFriendsOnly" Content="Aceitar conexões somente de amigos salvos" Foreground="White" FontSize="14" IsChecked="True" Margin="0,18,0,0" Checked="ChkFriendsOnly_Changed" Unchecked="ChkFriendsOnly_Changed"/>
                                     <TextBlock Text="Com esta opção desligada, qualquer máquina da VPN consegue entrar em uma live sem senha." Foreground="#AAAAAA" FontSize="12" TextWrapping="Wrap" Margin="20,5,0,0"/>
 
                                     <CheckBox x:Name="ChkForceGdiCapture" Content="Usar captura clássica de tela (GDI)" Foreground="White" FontSize="14" Margin="0,18,0,0" Checked="ChkForceGdiCapture_Changed" Unchecked="ChkForceGdiCapture_Changed"/>
+                                    <TextBlock x:Name="CaptureModeText" Foreground="#8A8A94" FontSize="11" Margin="26,4,0,0"
+                                               TextWrapping="Wrap" Text="Modo de captura: —"/>
                                     <TextBlock Text="Por padrão a tela é capturada pela Desktop Duplication (DXGI), mais leve. Marque esta opção se a transmissão ficar preta, travada ou com a imagem deslocada." Foreground="#AAAAAA" FontSize="12" TextWrapping="Wrap" Margin="20,5,0,0"/>
 
                                     <TextBlock Text="Excluir o áudio de um programa" Foreground="White" FontSize="14" Margin="0,18,0,0"/>

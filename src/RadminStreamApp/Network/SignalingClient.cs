@@ -32,11 +32,6 @@ namespace RadminStreamApp
             _encryptionKey = CryptoHelper.DeriveKey(password);
         }
 
-        public void DisableEncryption()
-        {
-            _encryptionKey = null;
-        }
-
         public async Task StartAsync(string ipAddress, int port = 8080)
         {
             var url = new Uri($"ws://{ipAddress}:{port}");
@@ -192,17 +187,6 @@ namespace RadminStreamApp
                 message = CryptoHelper.EncryptText(message, _encryptionKey);
             }
             _client.Send(message);
-        }
-
-        public void SendBinary(byte[] data)
-        {
-            if (_client == null || !_client.IsRunning) return;
-
-            if (_encryptionKey != null)
-            {
-                data = CryptoHelper.EncryptBytes(data, _encryptionKey);
-            }
-            _client.Send(data);
         }
 
         public void Stop()

@@ -15,6 +15,14 @@
     <FileVersion>$(Version)</FileVersion>
     <ApplicationIcon>Assets\app_icon.ico</ApplicationIcon>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+
+    <!-- NU1903: SIPSorcery 8.0.23 tem dois advisories abertos (GHSA-28gm-jrmw-xx93 e
+         GHSA-jwjp-4649-v8jp). A correção só existe na linha 10.x, que exige .NET 10 —
+         migrar o projeto inteiro é o pré-requisito, e é um trabalho à parte.
+         O aviso está silenciado de propósito, e não por descuido: repetido seis vezes em
+         todo build, ele treinava a gente a ignorar a lista de avisos inteira.
+         Ao migrar para .NET 10, remova esta linha. -->
+    <NoWarn>$(NoWarn);NU1903</NoWarn>
   </PropertyGroup>
 
   <ItemGroup>

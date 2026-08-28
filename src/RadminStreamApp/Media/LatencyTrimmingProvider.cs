@@ -22,9 +22,6 @@ namespace RadminStreamApp
 
         public WaveFormat WaveFormat => _source.WaveFormat;
 
-        /// <summary>Quanto de áudio já foi descartado por atraso — útil em diagnóstico.</summary>
-        public long TrimmedBytes { get; private set; }
-
         public LatencyTrimmingProvider(BufferedWaveProvider source, TimeSpan maxLatency, TimeSpan targetLatency)
         {
             _source = source ?? throw new ArgumentNullException(nameof(source));
@@ -58,8 +55,7 @@ namespace RadminStreamApp
 
             if (_discardBuffer.Length < toDiscard) _discardBuffer = new byte[toDiscard];
 
-            int discarded = _source.Read(_discardBuffer, 0, toDiscard);
-            TrimmedBytes += discarded;
+            _source.Read(_discardBuffer, 0, toDiscard);
         }
     }
 }

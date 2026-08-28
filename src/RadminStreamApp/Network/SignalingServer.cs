@@ -37,7 +37,6 @@ namespace RadminStreamApp
         private byte[]? EncryptionKey => string.IsNullOrEmpty(RoomPassword) ? null : CryptoHelper.DeriveKey(RoomPassword);
 
         public event Action<IWebSocketConnection, string>? OnMessageReceived;
-        public event Action<IWebSocketConnection, byte[]>? OnBinaryReceived;
         public event Action<IWebSocketConnection>? OnClientConnected;
         public event Action<IWebSocketConnection>? OnClientDisconnected;
 
@@ -147,6 +146,13 @@ namespace RadminStreamApp
         {
             try
             {
+                if (!IsPortFree(ipAddress, port))
+                {
+                    Debug.WriteLine($"[Server] Porta {port} já está em uso.");
+                    IsRunning = false;
+                    return false;
+                }
+
                 StartInternal(ipAddress, port);
                 IsRunning = true;
                 return true;
@@ -162,6 +168,44 @@ namespace RadminStreamApp
         }
 
         public bool IsRunning { get; private set; }
+
+        /// <summary>
+        /// Testa a porta com posse exclusiva antes de entregá-la ao Fleck.
+        ///
+        /// O Fleck não pede exclusividade ao ligar, e sem isso o Windows deixa duas instâncias
+        /// do app ligarem na mesma 8080: as duas achavam que tinham subido, o Start devolvia
+        /// true para ambas, o aviso de "porta já em uso" nunca aparecia — e as conexões dos
+        /// amigos caíam numa das duas sem critério.
+        /// </summary>
+        private static bool IsPortFree(string ipAddress, int port)
+        {
+            try
+            {
+                var address = ipAddress == "0.0.0.0"
+                    ? System.Net.IPAddress.Any
+                    : System.Net.IPAddress.Parse(ipAddress);
+
+                var probe = new System.Net.Sockets.TcpListener(address, port) { ExclusiveAddressUse = true };
+                try
+                {
+                    probe.Start();
+                    return true;
+                }
+                finally
+                {
+                    try { probe.Stop(); } catch { }
+                }
+            }
+            catch (System.Net.Sockets.SocketException)
+            {
+                return false;
+            }
+            catch (FormatException)
+            {
+                // Endereço inválido não é "porta ocupada": deixa o Fleck falhar e reportar.
+                return true;
+            }
+        }
 
         private void StartInternal(string ipAddress, int port)
         {
@@ -267,23 +311,8 @@ namespace RadminStreamApp
                     OnMessageReceived?.Invoke(socket, plainMessage);
                 };
 
-                socket.OnBinary = bytes =>
-                {
-                    var plainBytes = bytes;
-                    var key = EncryptionKey;
-                    if (key != null)
-                    {
-                        bool isAuth;
-                        lock (_clientsLock) { isAuth = _authenticatedClients.Contains(socket.ConnectionInfo.Id); }
-                        if (!isAuth) return;
-
-                        var decrypted = CryptoHelper.TryDecryptBytes(bytes, key);
-                        // Com AES-GCM, null aqui significa payload adulterado: descarta.
-                        if (decrypted == null) return;
-                        plainBytes = decrypted;
-                    }
-                    OnBinaryReceived?.Invoke(socket, plainBytes);
-                };
+                // Nao ha socket.OnBinary: nenhum viewer manda binario para o host. O audio
+                // viaja so na direcao host -> viewer, via BroadcastBinary.
             });
 
             Debug.WriteLine($"[Server] Started on ws://{ipAddress}:{port}");
@@ -360,11 +389,6 @@ namespace RadminStreamApp
             if (isNew) OnClientConnected?.Invoke(socket);
         }
 
-        public void SendMessage(IWebSocketConnection client, string message)
-        {
-            client.Send(message);
-        }
-
         public void SendToClient(string clientId, string message)
         {
             IWebSocketConnection? client;
@@ -383,6 +407,7 @@ namespace RadminStreamApp
         {
             var clientsCopy = GetBroadcastTargets();
             if (clientsCopy.Count == 0) return;
+
 
             var key = EncryptionKey;
             var payload = key != null ? CryptoHelper.EncryptBytes(data, key) : data;
@@ -405,10 +430,45 @@ namespace RadminStreamApp
             }
         }
 
+        /// <summary>
+        /// Ha alguem para receber uma difusao agora? Consultado pelo caminho de audio antes de
+        /// empacotar o quadro: sem isto, montavamos ~50 pacotes por segundo para descartar
+        /// todos no fim da linha enquanto a sala esta vazia.
+        /// </summary>
+        public bool HasBroadcastTargets
+        {
+            get
+            {
+                lock (_clientsLock)
+                {
+                    if (_viewers.Count == 0) return false;
+                    return CountBroadcastTargetsLocked() > 0;
+                }
+            }
+        }
+
+        private int CountBroadcastTargetsLocked()
+        {
+            if (string.IsNullOrEmpty(RoomPassword)) return _viewers.Count;
+
+            int count = 0;
+            foreach (var id in _viewers)
+            {
+                if (_authenticatedClients.Contains(id)) count++;
+            }
+            return count;
+        }
+
+        private static readonly List<IWebSocketConnection> NoTargets = new List<IWebSocketConnection>();
+
         private List<IWebSocketConnection> GetBroadcastTargets()
         {
             lock (_clientsLock)
             {
+                // Sala vazia e o estado normal enquanto ninguem entrou: sair antes do LINQ
+                // evita alocar uma lista por quadro so para descobrir que ela esta vazia.
+                if (_viewers.Count == 0) return NoTargets;
+
                 var targets = _clients.Where(c => _viewers.Contains(c.ConnectionInfo.Id));
                 if (!string.IsNullOrEmpty(RoomPassword))
                     targets = targets.Where(c => _authenticatedClients.Contains(c.ConnectionInfo.Id));

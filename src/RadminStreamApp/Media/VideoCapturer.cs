@@ -12,7 +12,12 @@ namespace RadminStreamApp
     /// como reserva; e todos os buffers são reaproveitados entre quadros — antes cada
     /// quadro alocava dois Bitmaps e um array de ~6 MB, o que jogava centenas de MB/s no LOH.
     /// </summary>
-    public class VideoCapturer : IVideoSource, IDisposable
+    /// <remarks>
+    /// Não implementa <c>IVideoSource</c>: o quadro é entregue à mão ao encoder pelo
+    /// StreamManager, nunca através da interface. Enquanto ela existiu, arrastava uma dúzia
+    /// de membros stub que ninguém chamava.
+    /// </remarks>
+    public class VideoCapturer : IDisposable
     {
         private bool _isCapturing = false;
         private int _isCapturingFrame = 0;
@@ -30,10 +35,20 @@ namespace RadminStreamApp
         private Bitmap? _captureBitmap;      // wrapper zero-copy sobre _captureBuffer
         private Bitmap? _gdiBitmap;          // destino do CopyFromScreen (caminho GDI)
         private Bitmap? _scaledBitmap;       // destino do DrawImage quando há redução
+        // Contextos GDI+ vivem junto dos bitmaps. Antes cada quadro criava (e descartava) um
+        // Graphics para o cursor, outro para o BitBlt e outro para a escala — três alocações
+        // de contexto GDI+ por quadro, 60x por segundo, na thread de captura.
+        private Graphics? _captureGraphics;
+        private Graphics? _gdiGraphics;
+        private Graphics? _scaledGraphics;
         // Anel de buffers de saída. O encoder consome o quadro numa Task separada e a UI
         // copia o mesmo array no dispatcher — com um único buffer, a captura seguinte
         // sobrescrevia os bytes embaixo de ambos, corrompendo o vídeo transmitido.
         private const int OutputBufferCount = 3;
+
+        /// <summary>O quadro sai em BGRA de 32 bits — o formato que o DXGI entrega.</summary>
+        public const int BytesPerPixel = 4;
+
         private byte[]?[] _outputBuffers = new byte[]?[OutputBufferCount];
         private int _outputBufferIndex;
         private int _bufferWidth, _bufferHeight;
@@ -100,7 +115,6 @@ namespace RadminStreamApp
         }
 
         public event RawVideoSampleDelegate? OnVideoSourceRawSample;
-        public event EncodedSampleDelegate OnVideoSourceEncodedSample = delegate {};
 
         [StructLayout(LayoutKind.Sequential)]
         struct POINT
@@ -158,34 +172,20 @@ namespace RadminStreamApp
             }
         }
 
-        public Task StartVideo()
+        public void StartVideo()
         {
             _isCapturing = true;
             _lastFrameTicks = _frameClock.ElapsedTicks;
             // 60 FPS approx (16ms) - Mais fluido
             _timer = new System.Threading.Timer(CaptureFrame, null, 0, 16);
-            return Task.CompletedTask;
         }
 
-        public Task PauseVideo()
-        {
-            _isCapturing = false;
-            return Task.CompletedTask;
-        }
-
-        public Task ResumeVideo()
-        {
-            _isCapturing = true;
-            return Task.CompletedTask;
-        }
-
-        public Task CloseVideo()
+        public void CloseVideo()
         {
             _isCapturing = false;
             _timer?.Dispose();
             _timer = null;
             ReleaseBuffers();
-            return Task.CompletedTask;
         }
 
         /// <summary>(Re)aloca os buffers só quando a resolução de captura muda.</summary>
@@ -204,12 +204,23 @@ namespace RadminStreamApp
             _captureBitmap = new Bitmap(width, height, width * 4, PixelFormat.Format32bppRgb,
                 _captureHandle.AddrOfPinnedObject());
             _gdiBitmap = new Bitmap(width, height, PixelFormat.Format32bppRgb);
+
+            _captureGraphics = Graphics.FromImage(_captureBitmap);
+            _gdiGraphics = Graphics.FromImage(_gdiBitmap);
         }
 
         private void ReleaseBuffers()
         {
             lock (_bufferLock)
             {
+                // Os contextos saem antes dos bitmaps que eles desenham.
+                _captureGraphics?.Dispose();
+                _captureGraphics = null;
+                _gdiGraphics?.Dispose();
+                _gdiGraphics = null;
+                _scaledGraphics?.Dispose();
+                _scaledGraphics = null;
+
                 _captureBitmap?.Dispose();
                 _captureBitmap = null;
                 if (_captureHandle.IsAllocated) _captureHandle.Free();
@@ -264,10 +275,12 @@ namespace RadminStreamApp
 
             bool gotNewFrame;
             Bitmap source;
+            Graphics sourceGraphics;
 
             if (!_duplicationUnavailable && TryCaptureWithDuplication(bounds))
             {
                 source = _captureBitmap!;
+                sourceGraphics = _captureGraphics!;
                 _hasRealFrame = true;
                 gotNewFrame = true;
             }
@@ -275,6 +288,7 @@ namespace RadminStreamApp
             {
                 if (!CaptureWithGdi(left, top, width, height)) return;
                 source = _gdiBitmap!;
+                sourceGraphics = _gdiGraphics!;
                 _hasRealFrame = true;
                 gotNewFrame = true;
             }
@@ -290,12 +304,13 @@ namespace RadminStreamApp
                 if (_lastEmit != TimeSpan.MinValue && _frameClock.Elapsed - _lastEmit < IdleFrameInterval) return;
 
                 source = _captureBitmap!;
+                sourceGraphics = _captureGraphics!;
                 gotNewFrame = false;
             }
 
             // Só no quadro novo: o buffer do DXGI só é reescrito quando há imagem nova, então
             // redesenhar na reemissão deixaria um rastro de cursores acumulados.
-            if (gotNewFrame) DrawCursor(source, left, top);
+            if (gotNewFrame) DrawCursor(sourceGraphics, left, top);
 
             // Escala se passar do limite; dimensões múltiplas de 4 evitam padding de stride.
             float scale = 1.0f;
@@ -315,24 +330,23 @@ namespace RadminStreamApp
             {
                 if (_scaledBitmap == null || _scaledBitmap.Width != outWidth || _scaledBitmap.Height != outHeight)
                 {
+                    _scaledGraphics?.Dispose();
                     _scaledBitmap?.Dispose();
                     _scaledBitmap = new Bitmap(outWidth, outHeight, PixelFormat.Format32bppRgb);
+                    _scaledGraphics = Graphics.FromImage(_scaledBitmap);
                 }
 
-                using (var g = Graphics.FromImage(_scaledBitmap))
-                {
-                    g.InterpolationMode = _isMaxPerformance
-                        ? System.Drawing.Drawing2D.InterpolationMode.NearestNeighbor
-                        : System.Drawing.Drawing2D.InterpolationMode.Bilinear;
-                    g.DrawImage(source, 0, 0, outWidth, outHeight);
-                }
+                _scaledGraphics!.InterpolationMode = _isMaxPerformance
+                    ? System.Drawing.Drawing2D.InterpolationMode.NearestNeighbor
+                    : System.Drawing.Drawing2D.InterpolationMode.Bilinear;
+                _scaledGraphics.DrawImage(source, 0, 0, outWidth, outHeight);
                 finalBitmap = _scaledBitmap;
             }
 
             var handler = OnVideoSourceRawSample;
             if (handler == null) return;
 
-            int outputSize = outWidth * outHeight * 3;
+            int outputSize = outWidth * outHeight * BytesPerPixel;
 
             _outputBufferIndex = (_outputBufferIndex + 1) % OutputBufferCount;
             var output = _outputBuffers[_outputBufferIndex];
@@ -342,7 +356,7 @@ namespace RadminStreamApp
                 _outputBuffers[_outputBufferIndex] = output;
             }
 
-            ConvertBgraToBgr24(finalBitmap, outWidth, outHeight, output);
+            CopyBgra32(finalBitmap, outWidth, outHeight, output);
 
             // Duração real desde o quadro anterior, em milissegundos.
             long nowTicks = _frameClock.ElapsedTicks;
@@ -351,7 +365,7 @@ namespace RadminStreamApp
             _lastFrameTicks = nowTicks;
 
             _lastEmit = _frameClock.Elapsed;
-            handler(durationMs, outWidth, outHeight, output, VideoPixelFormatsEnum.Bgr);
+            handler(durationMs, outWidth, outHeight, output, VideoPixelFormatsEnum.Bgra);
         }
 
         /// <summary>Tenta o caminho DXGI; marca como indisponível de vez se não der para criar.</summary>
@@ -406,14 +420,13 @@ namespace RadminStreamApp
 
         private bool CaptureWithGdi(int left, int top, int width, int height)
         {
-            if (_gdiBitmap == null) return false;
+            if (_gdiGraphics == null) return false;
 
-            using var g = Graphics.FromImage(_gdiBitmap);
-            g.CopyFromScreen(left, top, 0, 0, new Size(width, height), CopyPixelOperation.SourceCopy);
+            _gdiGraphics.CopyFromScreen(left, top, 0, 0, new Size(width, height), CopyPixelOperation.SourceCopy);
             return true;
         }
 
-        private static void DrawCursor(Bitmap target, int left, int top)
+        private static void DrawCursor(Graphics g, int left, int top)
         {
             CURSORINFO pci;
             pci.cbSize = Marshal.SizeOf(typeof(CURSORINFO));
@@ -430,37 +443,45 @@ namespace RadminStreamApp
                 if (ii.hbmColor != IntPtr.Zero) DeleteObject(ii.hbmColor);
             }
 
-            using var g = Graphics.FromImage(target);
             IntPtr hdc = g.GetHdc();
             try { DrawIcon(hdc, cursorX, cursorY, pci.hCursor); }
             finally { g.ReleaseHdc(hdc); }
         }
 
         /// <summary>
-        /// BGRA de 32 bits → BGR de 24 bits, direto no buffer de saída. Antes isso era feito
-        /// pedindo Format24bppRgb no LockBits, o que fazia o GDI+ converter o quadro inteiro
-        /// a cada captura.
+        /// Copia o quadro BGRA de 32 bits para o buffer de saída, sem tocar nos pixels.
+        ///
+        /// Aqui havia uma conversão BGRA→BGR24 escrita à mão, byte a byte: a 1920x1080 são
+        /// 2,07 milhões de iterações por quadro, na thread de captura, sem SIMD. Ela era
+        /// redundante — o encoder recebe o formato declarado e converte para I420 com o
+        /// swscale do FFmpeg, que é vetorizado. Entregar BGRA (o formato que o DXGI já
+        /// produz) elimina a passada inteira e deixa a conversão de cor com o swscale.
+        ///
+        /// O que sobra é uma cópia linear: uma única memcpy quando não há padding de stride,
+        /// que é o caso normal em 32 bits, e linha a linha quando há.
         /// </summary>
-        private static unsafe void ConvertBgraToBgr24(Bitmap source, int width, int height, byte[] destination)
+        private static unsafe void CopyBgra32(Bitmap source, int width, int height, byte[] destination)
         {
             var data = source.LockBits(new Rectangle(0, 0, width, height), ImageLockMode.ReadOnly, PixelFormat.Format32bppRgb);
             try
             {
+                long rowBytes = (long)width * BytesPerPixel;
+
                 fixed (byte* dstBase = destination)
                 {
+                    if (data.Stride == rowBytes)
+                    {
+                        Buffer.MemoryCopy((byte*)data.Scan0, dstBase, destination.Length, rowBytes * height);
+                        return;
+                    }
+
                     for (int y = 0; y < height; y++)
                     {
-                        byte* src = (byte*)data.Scan0 + (long)y * data.Stride;
-                        byte* dst = dstBase + (long)y * width * 3;
-
-                        for (int x = 0; x < width; x++)
-                        {
-                            dst[0] = src[0]; // B
-                            dst[1] = src[1]; // G
-                            dst[2] = src[2]; // R
-                            src += 4;
-                            dst += 3;
-                        }
+                        Buffer.MemoryCopy(
+                            (byte*)data.Scan0 + (long)y * data.Stride,
+                            dstBase + y * rowBytes,
+                            rowBytes,
+                            rowBytes);
                     }
                 }
             }
@@ -475,17 +496,5 @@ namespace RadminStreamApp
             CloseVideo();
         }
 
-        public void ForceKeyFrame() { }
-        public bool HasEncodedVideoSubscribers() { return false; }
-        public bool IsRestricted { get; } = false;
-        public System.Collections.Generic.List<VideoFormat> GetVideoSourceFormats() => new System.Collections.Generic.List<VideoFormat>();
-        public void SetVideoSourceFormat(VideoFormat format) { }
-        public void ExternalVideoSourceRawSample(uint durationMilliseconds, int width, int height, byte[] sample, VideoPixelFormatsEnum pixelFormat) { }
-
-        public void RestrictFormats(Func<VideoFormat, bool> filter) { }
-        public void ExternalVideoSourceRawSampleFaster(uint durationMilliseconds, RawImage sample) { }
-        public bool IsVideoSourcePaused() => !_isCapturing;
-        public event RawVideoSampleFasterDelegate OnVideoSourceRawSampleFaster = delegate {};
-        public event SourceErrorDelegate OnVideoSourceError = delegate {};
     }
 }

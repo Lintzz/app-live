@@ -62,6 +62,10 @@ namespace RadminStreamApp
 
         // Evita que sincronizar o estado visual dos toggles dispare os handlers de novo.
         private bool _syncingToggles;
+
+        // Ligada enquanto as preferências salvas são aplicadas aos controles, para a carga
+        // não disparar uma regravação do arquivo que acabou de ser lido.
+        private bool _loadingSettings;
         private bool _isBroadcasting;
         private string _hostVideoStats = string.Empty;
         private string _hostAudioStats = string.Empty;
@@ -102,6 +106,7 @@ namespace RadminStreamApp
 
             _settings = SettingsService.Load();
             _excludedAudioProcessName = _settings.ExcludedAudioProcessName;
+            ApplyLoadedSettings();
 
             _friends = new ObservableCollection<Friend>(FriendsService.LoadFriends());
 
@@ -227,8 +232,9 @@ namespace RadminStreamApp
 
         private void ChkFriendsOnly_Changed(object sender, RoutedEventArgs e)
         {
-            if (_server == null || ChkFriendsOnly == null) return;
-            _server.RestrictToAllowedIps = ChkFriendsOnly.IsChecked == true;
+            if (ChkFriendsOnly == null) return;
+            if (_server != null) _server.RestrictToAllowedIps = ChkFriendsOnly.IsChecked == true;
+            PersistSettings();
         }
 
         /// <summary>Aviso curto na barra de status, sem roubar o foco com um MessageBox.</summary>
@@ -485,9 +491,9 @@ namespace RadminStreamApp
         {
             System.Windows.Application.Current.Dispatcher.InvokeAsync(() =>
             {
-                if (_hostBitmap == null || _hostBitmap.PixelWidth != width || _hostBitmap.PixelHeight != height || _hostBitmap.Format != PixelFormats.Bgr24)
+                if (_hostBitmap == null || _hostBitmap.PixelWidth != width || _hostBitmap.PixelHeight != height || _hostBitmap.Format != PixelFormats.Bgr32)
                 {
-                    _hostBitmap = new WriteableBitmap(width, height, 96, 96, PixelFormats.Bgr24, null);
+                    _hostBitmap = new WriteableBitmap(width, height, 96, 96, PixelFormats.Bgr32, null);
                     VideoPlayer.Source = _hostBitmap;
                 }
 
@@ -1033,7 +1039,12 @@ namespace RadminStreamApp
         private void BtnClose_Click(object sender, RoutedEventArgs e) => Close();
 
         private void BtnSettingsModal_Click(object sender, RoutedEventArgs e)
-            => SettingsModalOverlay.Visibility = Visibility.Visible;
+        {
+            // Lido na abertura: o caminho só se define depois que a captura sobe, e pode
+            // trocar sozinho no meio da transmissão.
+            UpdateCaptureModeText();
+            SettingsModalOverlay.Visibility = Visibility.Visible;
+        }
 
         private void BtnCloseSettingsModal_Click(object sender, RoutedEventArgs e)
             => SettingsModalOverlay.Visibility = Visibility.Collapsed;
@@ -1042,17 +1053,66 @@ namespace RadminStreamApp
         {
             if (ChkMaxPerformance == null) return;
 
-            bool isMaxPerformance = ChkMaxPerformance.IsChecked == true;
+            ApplyLightweightMode(ChkMaxPerformance.IsChecked == true);
+            PersistSettings();
+        }
 
+        /// <summary>
+        /// Efeito do modo leve, separado do handler porque também precisa rodar na carga das
+        /// preferências: marcar um CheckBox no valor em que ele já está não dispara evento
+        /// nenhum, então confiar no handler deixaria a preferência salva sem aplicar.
+        /// </summary>
+        private void ApplyLightweightMode(bool lightweight)
+        {
             try
             {
-                Process.GetCurrentProcess().PriorityClass = isMaxPerformance
+                // BelowNormal é intencional: o modo leve cede CPU aos outros programas (o
+                // jogo que você está transmitindo, principalmente). O rótulo antigo dizia
+                // "Desempenho Máximo" e prometia o contrário do que a opção faz.
+                Process.GetCurrentProcess().PriorityClass = lightweight
                     ? ProcessPriorityClass.BelowNormal
                     : ProcessPriorityClass.Normal;
             }
             catch { }
 
-            _hostBroadcast?.ApplyMaxPerformance(isMaxPerformance);
+            _hostBroadcast?.ApplyMaxPerformance(lightweight);
+        }
+
+        /// <summary>
+        /// Reflete nos controles o que foi lido do settings.json. Os handlers disparam ao
+        /// marcar cada caixa — é assim que a prioridade do processo e a captura GDI passam a
+        /// valer —, e a trava evita que essa carga regrave o arquivo que acabou de ser lido.
+        /// </summary>
+        private void ApplyLoadedSettings()
+        {
+            _loadingSettings = true;
+            try
+            {
+                ChkMaxPerformance.IsChecked = _settings.LightweightMode;
+                ChkFriendsOnly.IsChecked = _settings.RestrictToFriends;
+                ChkForceGdiCapture.IsChecked = _settings.ForceGdiCapture;
+            }
+            finally
+            {
+                _loadingSettings = false;
+            }
+
+            // O servidor ainda não existe aqui (sobe logo abaixo, já lendo ChkFriendsOnly) e o
+            // GDI é lido ao iniciar a transmissão. Só a prioridade precisa ser aplicada agora.
+            ApplyLightweightMode(_settings.LightweightMode);
+        }
+
+        /// <summary>Grava o estado atual dos controles de configuração.</summary>
+        private void PersistSettings()
+        {
+            if (_loadingSettings) return;
+
+            _settings.LightweightMode = ChkMaxPerformance?.IsChecked == true;
+            _settings.RestrictToFriends = ChkFriendsOnly?.IsChecked != false;
+            _settings.ForceGdiCapture = ChkForceGdiCapture?.IsChecked == true;
+            _settings.ExcludedAudioProcessName = _excludedAudioProcessName;
+
+            SettingsService.Save(_settings);
         }
 
         // ──────────────────── Exclusão de áudio por processo ────────────────────
@@ -1084,8 +1144,7 @@ namespace RadminStreamApp
             _excludedAudioProcessName = option.Name;
             UpdateAudioExclusionWarning();
 
-            _settings.ExcludedAudioProcessName = option.Name;
-            Services.SettingsService.Save(_settings);
+            PersistSettings();
 
             // Vale já na transmissão em andamento.
             _hostBroadcast?.ApplyExcludedAudioProcess(ResolveExcludedAudioPid());
@@ -1114,6 +1173,26 @@ namespace RadminStreamApp
         private void ChkForceGdiCapture_Changed(object sender, RoutedEventArgs e)
         {
             _hostBroadcast?.ApplyForceGdiCapture(ChkForceGdiCapture?.IsChecked == true);
+            PersistSettings();
+            UpdateCaptureModeText();
+        }
+
+        /// <summary>
+        /// Mostra qual caminho de captura está valendo. O DXGI cai sozinho para o GDI em
+        /// máquinas onde a duplicação não funciona (RDP, GPU híbrida, driver antigo), e sem
+        /// isso na tela o usuário só percebia pela queda de desempenho, sem saber a causa.
+        /// </summary>
+        private void UpdateCaptureModeText()
+        {
+            if (CaptureModeText == null) return;
+
+            var mode = _hostBroadcast?.ActiveCaptureMode ?? "—";
+            CaptureModeText.Text = mode switch
+            {
+                "DXGI" => "Modo de captura: DXGI (Desktop Duplication) — o caminho rápido.",
+                "GDI" => "Modo de captura: GDI — mais pesado; é a reserva usada quando a duplicação não está disponível.",
+                _ => "Modo de captura: — (definido quando a transmissão começa)"
+            };
         }
 
         private void GithubLink_Click(object sender, System.Windows.Input.MouseButtonEventArgs e)

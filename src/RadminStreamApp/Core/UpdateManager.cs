@@ -101,9 +101,6 @@ namespace RadminStreamApp
             }
         }
 
-        public static Task DownloadAndInstallUpdateAsync(string downloadUrl)
-            => DownloadAndInstallUpdateAsync(downloadUrl, null);
-
         /// <summary>
         /// Baixa o instalador e só executa depois de conferir o SHA-256 publicado na release.
         /// Antes o .exe era executado direto: um download corrompido (ou trocado) rodava com

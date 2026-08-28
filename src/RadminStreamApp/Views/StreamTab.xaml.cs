@@ -20,15 +20,17 @@ namespace RadminStreamApp
 
         private void Root_MouseLeftButtonDown(object sender, System.Windows.Input.MouseButtonEventArgs e)
         {
-            if (Session == null) return;
+            var session = Session;
+            if (session == null) return;
 
-            if (Session != null) OnActivated?.Invoke(Session);
-            if (e.ClickCount == 2) if (Session != null) OnFocusRequested?.Invoke(Session);
+            OnActivated?.Invoke(session);
+            if (e.ClickCount == 2) OnFocusRequested?.Invoke(session);
         }
 
         private void BtnClose_Click(object sender, RoutedEventArgs e)
         {
-            if (Session != null) if (Session != null) OnCloseRequested?.Invoke(Session);
+            var session = Session;
+            if (session != null) OnCloseRequested?.Invoke(session);
         }
     }
 }

@@ -16,11 +16,15 @@ using System.Linq;
 
 namespace RadminStreamApp
 {
-    public class StreamManager
+    public class StreamManager : IDisposable
     {
         private readonly Dictionary<string, RTCPeerConnection> _peerConnections = new Dictionary<string, RTCPeerConnection>();
-        private readonly VideoCapturer _videoCapturer;
-        private readonly AudioCapturer _audioCapturer;
+
+        // Nulos até EnsureCapturers() — o caminho de viewer nunca chega a criá-los.
+        private VideoCapturer? _videoCapturer;
+        private AudioCapturer? _audioCapturer;
+        private readonly object _capturerLock = new object();
+
         private IVideoEncoder? _videoEncoder;
         private readonly object _encoderLock = new object();
         private int _isEncoding = 0;
@@ -87,6 +91,14 @@ namespace RadminStreamApp
         /// <summary>Audio PCM para difusao pelo WebSocket (somente no modo legado).</summary>
         public event Action<byte[]>? OnBinaryDataReady;
 
+        /// <summary>
+        /// Consultado antes de empacotar cada quadro de audio. Sem viewer ouvindo, o pacote
+        /// era montado (uma alocacao por quadro, ~50x/s) so para ser descartado no fim da
+        /// linha — e transmitir para uma sala vazia e o estado normal enquanto os amigos
+        /// ainda nao entraram.
+        /// </summary>
+        public Func<bool>? HasAudioListeners { get; set; }
+
         private System.Threading.Timer? _hostStatsTimer;
         private System.Threading.Timer? _viewerStatsTimer;
         private int _statsEncodedFrames = 0;
@@ -140,15 +152,40 @@ namespace RadminStreamApp
         {
             EnsureMediaInitialized();
 
+            // O encoder serve aos dois lados — o host codifica, o viewer decodifica com ele.
+            // Os capturadores, não: quem só assiste nunca captura nada. Ver EnsureCapturers.
             InitEncoder();
+        }
 
-            _videoCapturer = new VideoCapturer();
-            _audioCapturer = new AudioCapturer();
-
-            // Connect raw video from capturer to encoder
-            _videoCapturer.OnVideoSourceRawSample += (duration, width, height, sample, format) =>
+        /// <summary>
+        /// Cria os capturadores na primeira vez que alguém precisa deles — o que só acontece
+        /// no caminho de host.
+        ///
+        /// Antes eles nasciam no construtor, e como existe um StreamManager por live aberta,
+        /// cada aba de viewer abria um <c>WasapiLoopbackCapture</c> e um
+        /// <c>MediaFoundationResampler</c> (objetos COM de verdade, criados já no construtor
+        /// do AudioCapturer) para nunca usar. Com quatro lives na grade eram quatro
+        /// dispositivos de áudio segurados à toa.
+        /// </summary>
+        private void EnsureCapturers()
+        {
+            lock (_capturerLock)
             {
-                OnLocalVideoFrameReady?.Invoke(sample, width, height, width * 3); // 24bpp
+                if (_videoCapturer != null) return;
+
+                _videoCapturer = new VideoCapturer();
+                _audioCapturer = new AudioCapturer();
+
+                WireCapturers(_videoCapturer, _audioCapturer);
+            }
+        }
+
+        private void WireCapturers(VideoCapturer videoCapturer, AudioCapturer audioCapturer)
+        {
+            // Connect raw video from capturer to encoder
+            videoCapturer.OnVideoSourceRawSample += (duration, width, height, sample, format) =>
+            {
+                OnLocalVideoFrameReady?.Invoke(sample, width, height, width * VideoCapturer.BytesPerPixel);
 
                 if (System.Threading.Interlocked.CompareExchange(ref _isEncoding, 1, 0) != 0)
                 {
@@ -200,9 +237,9 @@ namespace RadminStreamApp
                 });
             };
 
-            _audioCapturer.OnAudioFrameReady += OnCapturedPcm;
+            audioCapturer.OnAudioFrameReady += OnCapturedPcm;
 
-            _audioCapturer.OnCaptureError += (error) =>
+            audioCapturer.OnCaptureError += (error) =>
             {
                 OnAudioCaptureError?.Invoke(error);
             };
@@ -215,7 +252,11 @@ namespace RadminStreamApp
         private void OnCapturedPcm(byte[] pcm)
         {
             if (pcm == null || pcm.Length == 0) return;
+            if (HasAudioListeners != null && !HasAudioListeners()) return;
 
+            // O buffer NAO e reaproveitado de proposito: sem senha de sala ele segue direto
+            // para o Send do Fleck, que e assincrono. Reciclar o array por baixo de um envio
+            // em voo trocaria os bytes no meio do caminho.
             var packet = new byte[pcm.Length + 1];
             packet[0] = 1; // 1 = áudio
             Buffer.BlockCopy(pcm, 0, packet, 1, pcm.Length);
@@ -262,22 +303,37 @@ namespace RadminStreamApp
             {
                 if (_waveOut != null) return;
 
-                _waveProvider = new BufferedWaveProvider(format)
+                try
                 {
-                    DiscardOnBufferOverflow = true,
-                    BufferDuration = TimeSpan.FromMilliseconds(800)
-                };
+                    _waveProvider = new BufferedWaveProvider(format)
+                    {
+                        DiscardOnBufferOverflow = true,
+                        BufferDuration = TimeSpan.FromMilliseconds(800)
+                    };
 
-                _latencyTrimmer = new LatencyTrimmingProvider(_waveProvider, MaxAudioLatency, TargetAudioLatency);
+                    _latencyTrimmer = new LatencyTrimmingProvider(_waveProvider, MaxAudioLatency, TargetAudioLatency);
 
-                _volumeProvider = new NAudio.Wave.SampleProviders.VolumeSampleProvider(_latencyTrimmer.ToSampleProvider())
+                    _volumeProvider = new NAudio.Wave.SampleProviders.VolumeSampleProvider(_latencyTrimmer.ToSampleProvider())
+                    {
+                        Volume = _pendingVolume
+                    };
+
+                    _waveOut = new WaveOutEvent();
+                    _waveOut.Init(_volumeProvider);
+                    _waveOut.Play();
+                }
+                catch (Exception ex)
                 {
-                    Volume = _pendingVolume
-                };
+                    // Abrir o dispositivo de saida pode falhar (sem placa, driver ocupado).
+                    // Antes a excecao subia ate o handler do WebSocket e sumia no log global:
+                    // a live continuava, muda, sem nada explicando por que.
+                    _waveProvider = null;
+                    _latencyTrimmer = null;
+                    _volumeProvider = null;
+                    _waveOut = null;
 
-                _waveOut = new WaveOutEvent();
-                _waveOut.Init(_volumeProvider);
-                _waveOut.Play();
+                    ReportAudioFailure("abrir a saida de", ex);
+                }
             }
         }
 
@@ -288,10 +344,18 @@ namespace RadminStreamApp
 
             EnsureAudioOutput(new WaveFormat(AudioSampleRate, 16, AudioCapturer.Channels));
 
-            var pcm = new byte[data.Length - 1];
-            Buffer.BlockCopy(data, 1, pcm, 0, pcm.Length);
-            _waveProvider?.AddSamples(pcm, 0, pcm.Length);
-            System.Threading.Interlocked.Increment(ref _audioFramesDecoded);
+            var provider = _waveProvider;
+            if (provider == null) return;
+
+            try
+            {
+                provider.AddSamples(data, 1, data.Length - 1);
+                System.Threading.Interlocked.Increment(ref _audioFramesDecoded);
+            }
+            catch (Exception ex)
+            {
+                ReportAudioFailure("reproduzir o", ex);
+            }
         }
 
         private float _pendingVolume = 1.0f;
@@ -308,21 +372,34 @@ namespace RadminStreamApp
             }
         }
 
-        /// <summary>Força o caminho GDI de captura (ver <see cref="VideoCapturer"/>).</summary>
-        public void SetForceGdiCapture(bool forceGdi) => _videoCapturer?.SetForceGdiCapture(forceGdi);
+        // Todo ajuste de captura materializa os capturadores: quem chama qualquer um destes
+        // está montando uma transmissão. O viewer não chama nenhum, e é assim que ele escapa
+        // de abrir dispositivo de áudio e vídeo que nunca usaria.
 
-        /// <summary>Caminho de captura em uso — "DXGI" ou "GDI".</summary>
+        /// <summary>Força o caminho GDI de captura (ver <see cref="VideoCapturer"/>).</summary>
+        public void SetForceGdiCapture(bool forceGdi)
+        {
+            EnsureCapturers();
+            _videoCapturer!.SetForceGdiCapture(forceGdi);
+        }
+
+        /// <summary>
+        /// Caminho de captura em uso — "DXGI" ou "GDI". Leitura pura: não materializa nada,
+        /// devolve "—" enquanto não há captura montada.
+        /// </summary>
         public string ActiveCaptureMode => _videoCapturer?.ActiveCaptureMode ?? "—";
 
         public void SetResolution(int width, int height)
         {
-            _videoCapturer?.SetResolution(width, height);
+            EnsureCapturers();
+            _videoCapturer!.SetResolution(width, height);
         }
 
         public void SetMaxPerformanceMode(bool isMaxPerformance)
         {
+            EnsureCapturers();
             _isMaxPerformance = isMaxPerformance;
-            _videoCapturer?.SetMaxPerformanceMode(isMaxPerformance);
+            _videoCapturer!.SetMaxPerformanceMode(isMaxPerformance);
 
             lock (_encoderLock)
             {
@@ -337,7 +414,8 @@ namespace RadminStreamApp
 
         public void SetTargetSource(CaptureSource source)
         {
-            _videoCapturer.SetTargetSource(source);
+            EnsureCapturers();
+            _videoCapturer!.SetTargetSource(source);
         }
 
         /// <summary>
@@ -346,7 +424,8 @@ namespace RadminStreamApp
         /// </summary>
         public void SetExcludedAudioProcess(uint processId)
         {
-            _audioCapturer.SetTargetProcess(processId);
+            EnsureCapturers();
+            _audioCapturer!.SetTargetProcess(processId);
         }
 
         private void InitEncoder()
@@ -405,9 +484,10 @@ namespace RadminStreamApp
         public Task InitializeHost()
         {
             InitEncoder();
+            EnsureCapturers();
             _isHost = true;
-            _videoCapturer.StartVideo();
-            _audioCapturer.StartAudio();
+            _videoCapturer!.StartVideo();
+            _audioCapturer!.StartAudio();
 
             _hostStatsTimer = new System.Threading.Timer(_ =>
             {
@@ -645,11 +725,27 @@ namespace RadminStreamApp
             _keyFrameRequestTimer?.Dispose();
             _keyFrameRequestTimer = null;
 
-            _videoCapturer?.CloseVideo();
-            _audioCapturer?.CloseAudio();
-            _waveOut?.Stop();
-            _waveOut?.Dispose();
-            _waveOut = null;
+            // Dispose, e não só Close: o AudioCapturer segura um WasapiLoopbackCapture e um
+            // MediaFoundationResampler que CloseAudio não libera. Como o ViewerSession cria um
+            // StreamManager novo a cada conexão, reconexão e STREAM_STARTED, fechar sem
+            // liberar acumulava esses objetos ao longo da sessão.
+            lock (_capturerLock)
+            {
+                try { _videoCapturer?.Dispose(); } catch { }
+                _videoCapturer = null;
+                try { _audioCapturer?.Dispose(); } catch { }
+                _audioCapturer = null;
+            }
+
+            lock (_audioLock)
+            {
+                try { _waveOut?.Stop(); } catch { }
+                try { _waveOut?.Dispose(); } catch { }
+                _waveOut = null;
+                _volumeProvider = null;
+                _latencyTrimmer = null;
+                _waveProvider = null;
+            }
 
             lock (_peerConnections)
             {
@@ -665,5 +761,7 @@ namespace RadminStreamApp
                 _videoEncoder = null;
             }
         }
+
+        public void Dispose() => Stop();
     }
 }

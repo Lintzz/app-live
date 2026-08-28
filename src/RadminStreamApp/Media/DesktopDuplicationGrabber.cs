@@ -25,11 +25,8 @@ namespace RadminStreamApp
         public int Width { get; }
         public int Height { get; }
 
-        /// <summary>Canto superior esquerdo do monitor duplicado, em coordenadas de desktop.</summary>
-        public Point Origin { get; }
-
         private DesktopDuplicationGrabber(ID3D11Device device, ID3D11DeviceContext context,
-            IDXGIOutputDuplication duplication, ID3D11Texture2D staging, int width, int height, Point origin)
+            IDXGIOutputDuplication duplication, ID3D11Texture2D staging, int width, int height)
         {
             _device = device;
             _context = context;
@@ -37,7 +34,6 @@ namespace RadminStreamApp
             _staging = staging;
             Width = width;
             Height = height;
-            Origin = origin;
         }
 
         /// <summary>Cria o duplicador do monitor que contém <paramref name="bounds"/>, ou null.</summary>
@@ -94,8 +90,14 @@ namespace RadminStreamApp
                         });
 
                         output.Dispose();
+                        // O adapter também sai daqui: só o device, o contexto, a duplicação e a
+                        // textura seguem vivos no grabber. Antes o return pulava o Dispose lá
+                        // embaixo e deixava um IDXGIAdapter1 para trás a cada duplicador criado
+                        // — e um é criado a cada troca de monitor.
+                        adapter.Dispose();
+
                         return new DesktopDuplicationGrabber(device, context, duplication, staging,
-                            outputBounds.Width, outputBounds.Height, new Point(outputBounds.Left, outputBounds.Top));
+                            outputBounds.Width, outputBounds.Height);
                     }
 
                     adapter.Dispose();
