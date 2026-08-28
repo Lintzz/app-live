@@ -1209,6 +1209,12 @@ namespace RadminStreamApp
             catch { }
         }
 
+        [DllImport("kernel32.dll")]
+        private static extern IntPtr GetCurrentProcess();
+
+        [DllImport("kernel32.dll")]
+        private static extern bool TerminateProcess(IntPtr process, uint exitCode);
+
         protected override void OnClosed(EventArgs e)
         {
             _server?.Stop();
@@ -1218,6 +1224,41 @@ namespace RadminStreamApp
                 session.Dispose();
             }
             base.OnClosed(e);
+
+            ForceExit();
+        }
+
+        /// <summary>
+        /// Encerra o processo sem passar pelo desligamento normal do Windows.
+        ///
+        /// A captura de áudio por processo deixa uma thread presa para sempre dentro da
+        /// ApplicationLoopback.dll — o StartCaptureAsync nunca desenrola, nem depois do
+        /// StopCaptureAsync (ver <see cref="ProcessAudioCapturer"/>). É por isso que o
+        /// encerramento precisa ser forçado: sem isso o processo fica vivo em segundo plano
+        /// depois de a janela fechar.
+        ///
+        /// O <c>Environment.Exit</c> que fazia esse papel termina em ExitProcess, que chama
+        /// o DllMain de descarregamento de cada DLL carregada — inclusive o da
+        /// ApplicationLoopback, com a thread dela ainda lá dentro. Daí saía o
+        /// <c>SEHException</c> ao fechar com a live ligada, que o handler do App capturava e
+        /// transformava num aviso de erro bem na hora de sair.
+        ///
+        /// O TerminateProcess não chama DllMain nenhum: derruba o processo direto. Medido:
+        /// o mesmo teardown termina em 0xC000000D com Environment.Exit e em 0 com este.
+        /// Nada se perde — amigos e configurações são gravados de forma síncrona bem antes
+        /// daqui.
+        /// </summary>
+        private static void ForceExit()
+        {
+            try
+            {
+                TerminateProcess(GetCurrentProcess(), 0);
+            }
+            catch
+            {
+                // Se o P/Invoke falhar, cair no Exit ainda é melhor que deixar o processo vivo.
+            }
+
             Environment.Exit(0);
         }
 
