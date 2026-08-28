@@ -15,8 +15,29 @@ namespace RadminStreamApp
     /// Tudo aqui é best-effort: se a máquina não suportar (RDP, driver antigo, monitor
     /// híbrido), <see cref="TryCreate"/> devolve null e o capturador cai no caminho GDI.
     /// </summary>
+    /// <summary>Como terminou a tentativa de pegar um quadro.</summary>
+    public enum DuplicationFrame
+    {
+        /// <summary>Veio imagem nova.</summary>
+        Frame,
+
+        /// <summary>Nada mudou dentro do tempo, ou só o cursor se moveu. Normal.</summary>
+        Timeout,
+
+        /// <summary>
+        /// A duplicação morreu e não volta sozinha: jogo entrando em tela cheia exclusiva,
+        /// troca de desktop (UAC), mudança de modo de vídeo ou reinício do driver. O único
+        /// caminho é descartar este grabber e criar outro.
+        /// </summary>
+        Lost
+    }
+
     public sealed class DesktopDuplicationGrabber : IDisposable
     {
+        // DXGI_ERROR_WAIT_TIMEOUT: a espera acabou sem quadro novo. É o único código de
+        // falha que NÃO significa que a duplicação se perdeu.
+        private const int DxgiErrorWaitTimeout = unchecked((int)0x887A0027);
+
         private readonly ID3D11Device _device;
         private readonly ID3D11DeviceContext _context;
         private readonly IDXGIOutputDuplication _duplication;
@@ -117,14 +138,17 @@ namespace RadminStreamApp
 
         /// <summary>
         /// Copia o quadro atual para <paramref name="destination"/> (BGRA de 32 bits).
-        /// Devolve false quando não houve quadro novo dentro do timeout — nesse caso o
-        /// chamador reaproveita o último quadro em vez de gastar CPU.
+        ///
+        /// Distinguir <see cref="DuplicationFrame.Timeout"/> de <see cref="DuplicationFrame.Lost"/>
+        /// é o ponto: os dois já foram um <c>false</c> só, e quem chamava tratava tudo como
+        /// "a tela não mudou". Quando a duplicação de fato morria, a captura ficava reemitindo
+        /// o último quadro para sempre — a transmissão congelava e não voltava mais.
         ///
         /// O número de linhas copiadas é limitado por <paramref name="destinationHeight"/> e
         /// pelo tamanho real do array: o monitor pode ter altura diferente da esperada pelo
         /// chamador (escala de DPI), e sem esse limite a cópia passava do fim do buffer.
         /// </summary>
-        public unsafe bool TryGetFrame(byte[] destination, int destinationStride, int destinationHeight, int timeoutMs = 15)
+        public unsafe DuplicationFrame TryGetFrame(byte[] destination, int destinationStride, int destinationHeight, int timeoutMs = 15)
         {
             IDXGIResource? desktopResource = null;
             bool acquired = false;
@@ -132,11 +156,16 @@ namespace RadminStreamApp
             try
             {
                 var result = _duplication.AcquireNextFrame((uint)timeoutMs, out var frameInfo, out desktopResource);
-                if (result.Failure || desktopResource == null) return false;
+                if (result.Failure || desktopResource == null)
+                {
+                    return result.Code == DxgiErrorWaitTimeout
+                        ? DuplicationFrame.Timeout
+                        : DuplicationFrame.Lost;
+                }
                 acquired = true;
 
                 // LastPresentTime zerado = só o cursor mudou; a imagem é a mesma.
-                if (frameInfo.LastPresentTime == 0) return false;
+                if (frameInfo.LastPresentTime == 0) return DuplicationFrame.Timeout;
 
                 using (var texture = desktopResource.QueryInterface<ID3D11Texture2D>())
                 {
@@ -167,11 +196,13 @@ namespace RadminStreamApp
                     _context.Unmap(_staging, 0);
                 }
 
-                return true;
+                return DuplicationFrame.Frame;
             }
             catch
             {
-                return false;
+                // Mapear e copiar só falha quando o dispositivo está ruim: tratar como perda
+                // faz o chamador recriar, em vez de insistir num grabber quebrado.
+                return DuplicationFrame.Lost;
             }
             finally
             {

@@ -443,22 +443,70 @@ namespace RadminStreamApp
                 return false;
             }
 
-            if (!_duplication.TryGetFrame(_captureBuffer!, _bufferWidth * 4, _bufferHeight))
+            var frame = _duplication.TryGetFrame(_captureBuffer!, _bufferWidth * 4, _bufferHeight);
+            int timeouts = frame == DuplicationFrame.Timeout ? _duplicationFailures + 1 : 0;
+
+            switch (DecideDuplicationAction(frame, timeouts, _hasRealFrame))
             {
-                // Timeout é normal (tela parada). Uma sequência longa deles não é: aí a
-                // duplicação não está funcionando de verdade e o GDI assume.
-                if (++_duplicationFailures >= DuplicationFailureLimit && !_hasRealFrame)
-                {
+                case DuplicationAction.Use:
+                    _duplicationFailures = 0;
+                    return true;
+
+                case DuplicationAction.Recreate:
+                    System.Diagnostics.Debug.WriteLine("[Capture] Duplicação perdida; recriando.");
+                    _duplication.Dispose();
+                    _duplication = null;
+                    _duplicationFailures = 0;
+                    return false;
+
+                case DuplicationAction.FallBackToGdi:
                     System.Diagnostics.Debug.WriteLine("[Capture] Duplicação sem quadros; voltando para GDI.");
                     _duplication.Dispose();
                     _duplication = null;
                     _duplicationUnavailable = true;
-                }
-                return false;
-            }
+                    return false;
 
-            _duplicationFailures = 0;
-            return true;
+                default: // Retry
+                    _duplicationFailures = timeouts;
+                    return false;
+            }
+        }
+
+        /// <summary>O que fazer depois de uma tentativa de pegar quadro do DXGI.</summary>
+        internal enum DuplicationAction
+        {
+            /// <summary>Veio quadro novo: usar.</summary>
+            Use,
+
+            /// <summary>Nada mudou; tentar de novo no próximo tique.</summary>
+            Retry,
+
+            /// <summary>Duplicação morta: descartar e criar outra.</summary>
+            Recreate,
+
+            /// <summary>A duplicação nunca entregou nada; o GDI assume de vez.</summary>
+            FallBackToGdi
+        }
+
+        /// <summary>
+        /// Decide o destino de cada tentativa. Isolado e testável porque foi exatamente aqui
+        /// que a transmissão congelava: perda e timeout chegavam como o mesmo <c>false</c>, e
+        /// a recuperação estava presa a <c>!hasRealFrame</c> — depois do primeiro quadro, uma
+        /// duplicação perdida nunca mais era recriada e a live ficava travada no último quadro.
+        /// </summary>
+        internal static DuplicationAction DecideDuplicationAction(
+            DuplicationFrame frame, int consecutiveTimeouts, bool hasRealFrame)
+        {
+            if (frame == DuplicationFrame.Frame) return DuplicationAction.Use;
+
+            // Perda é sempre recuperável recriando, tenha ou não vindo quadro antes.
+            if (frame == DuplicationFrame.Lost) return DuplicationAction.Recreate;
+
+            // Timeout: normal com a tela parada. Só vira desistência se NUNCA veio quadro —
+            // aí a duplicação existe mas não funciona nesta máquina.
+            return consecutiveTimeouts >= DuplicationFailureLimit && !hasRealFrame
+                ? DuplicationAction.FallBackToGdi
+                : DuplicationAction.Retry;
         }
 
         private bool CaptureWithGdi(int left, int top, int width, int height)
