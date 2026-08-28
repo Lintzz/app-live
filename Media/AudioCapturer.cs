@@ -25,6 +25,13 @@ namespace RadminStreamApp
             _loopbackCapture = new WasapiLoopbackCapture();
             _bufferedProvider = new BufferedWaveProvider(_loopbackCapture.WaveFormat);
             _bufferedProvider.DiscardOnBufferOverflow = true;
+
+            // ReadFully (o padrão é true) completa toda leitura com silêncio, então o resampler
+            // nunca enxerga o fim da fonte e o laço de leitura abaixo não termina nunca: o callback
+            // do WASAPI fica preso nele e o que sai para os viewers é um filete de áudio real
+            // seguido de silêncio infinito. Com false, Read devolve só o que foi capturado de
+            // verdade e o laço encerra a cada callback.
+            _bufferedProvider.ReadFully = false;
             
             _resampler = new MediaFoundationResampler(_bufferedProvider, new WaveFormat(SampleRate, 16, Channels));
             _resampler.ResamplerQuality = 60;
