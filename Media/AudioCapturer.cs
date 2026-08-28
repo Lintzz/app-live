@@ -6,11 +6,8 @@ namespace RadminStreamApp
 {
     public class AudioCapturer : IAudioSource, IDisposable
     {
-        /// <summary>
-        /// 48 kHz é a taxa nativa do Opus, usado agora para mandar o áudio pela própria
-        /// trilha WebRTC. Antes eram 44,1 kHz porque o PCM cru ia direto pelo WebSocket.
-        /// </summary>
-        public const int SampleRate = 48000;
+        /// <summary>Taxa do PCM difundido pelo WebSocket.</summary>
+        public const int SampleRate = 44100;
         public const int Channels = 2;
 
         private WasapiLoopbackCapture _loopbackCapture;

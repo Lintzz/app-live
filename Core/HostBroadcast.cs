@@ -10,7 +10,6 @@ namespace RadminStreamApp
         public string RoomPassword { get; init; } = string.Empty;
         public bool MaxPerformance { get; init; } = true;
         public bool ForceGdiCapture { get; init; }
-        public bool LegacyAudio { get; init; }
         public uint ExcludedAudioProcessId { get; init; }
         public int Width { get; init; } = 1920;
         public int Height { get; init; } = 1080;
@@ -40,7 +39,7 @@ namespace RadminStreamApp
 
         public event Action<string>? AudioCaptureError;
 
-        /// <summary>Audio PCM para difundir pelo WebSocket (somente no modo legado).</summary>
+        /// <summary>Áudio PCM capturado, para difusão pelo WebSocket.</summary>
         public event Action<byte[]>? BinaryAudioReady;
 
         public bool IsBroadcasting { get; private set; }
@@ -69,7 +68,6 @@ namespace RadminStreamApp
             manager.OnHostStatsUpdated += (fps, kbps) => StatsUpdated?.Invoke(fps, kbps);
             manager.OnAudioStatsUpdated += (frames) => AudioStatsUpdated?.Invoke(frames);
             manager.OnBinaryDataReady += (data) => BinaryAudioReady?.Invoke(data);
-            manager.SetLegacyAudio(settings.LegacyAudio);
 
             if (_server != null)
             {

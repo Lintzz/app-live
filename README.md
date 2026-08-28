@@ -76,7 +76,7 @@ O instalador final será gerado na raiz do projeto com o nome **`RadminStream_Se
 - **Bibliotecas Importantes**:
   - `Fleck` (WebSocket)
   - `NAudio` (Áudio)
-  - `SIPSorcery` (WebRTC — vídeo H.264 e áudio Opus)
+  - `SIPSorcery` (WebRTC — vídeo H.264)
   - `Vortice.Direct3D11` / `Vortice.DXGI` (captura de tela via Desktop Duplication)
   - A DLL `ApplicationLoopback.dll` é preservada para fornecer suporte à captura de áudio específica por processo.
 
@@ -87,11 +87,16 @@ O instalador final será gerado na raiz do projeto com o nome **`RadminStream_Se
 | Mídia | Codec | Transporte |
 |---|---|---|
 | Vídeo | H.264 (libx264, `ultrafast` + `zerolatency`) | Trilha de vídeo do WebRTC |
-| Áudio | Opus 48 kHz mono, quadros de 20 ms | Trilha de áudio do WebRTC |
+| Áudio | PCM 44,1 kHz estéreo, 16 bits (sem compressão) | WebSocket de sinalização |
 | Sinalização | JSON | WebSocket na porta 8080 |
 
 A captura de tela usa a **Desktop Duplication API (DXGI)**, com o `CopyFromScreen` do GDI como
 reserva automática para máquinas onde a duplicação não está disponível (RDP, drivers antigos).
+
+> O áudio já viajou em Opus pela trilha do WebRTC (v1.0.18 a v1.0.21), o que gastaria bem menos
+> banda e manteria som e imagem em sincronia. Nunca funcionou em campo e foi revertido. O PCM
+> cru custa ~1,4 Mbps por viewer e não sincroniza com o vídeo, mas funciona — e o atraso que
+> se acumula por diferença de relógio é contido pelo `LatencyTrimmingProvider`.
 
 ---
 

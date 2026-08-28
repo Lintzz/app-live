@@ -182,7 +182,6 @@ namespace RadminStreamApp
                     await _streamManager.HandleSignalingMessage("host", message);
             };
 
-            // Modo legado: o audio chega como PCM pelo proprio WebSocket.
             _client.OnBinaryReceived += (data) => _streamManager?.ProcessReceivedBinary(data);
 
             _client.OnConnected += async (isReconnect) =>

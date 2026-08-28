@@ -726,9 +726,6 @@
                                     <CheckBox x:Name="ChkForceGdiCapture" Content="Usar captura clássica de tela (GDI)" Foreground="White" FontSize="14" Margin="0,18,0,0" Checked="ChkForceGdiCapture_Changed" Unchecked="ChkForceGdiCapture_Changed"/>
                                     <TextBlock Text="Por padrão a tela é capturada pela Desktop Duplication (DXGI), mais leve. Marque esta opção se a transmissão ficar preta, travada ou com a imagem deslocada." Foreground="#AAAAAA" FontSize="12" TextWrapping="Wrap" Margin="20,5,0,0"/>
 
-                                    <CheckBox x:Name="ChkLegacyAudio" Content="Enviar áudio pelo método antigo (WebSocket)" Foreground="White" FontSize="14" Margin="0,18,0,0" Checked="ChkLegacyAudio_Changed" Unchecked="ChkLegacyAudio_Changed"/>
-                                    <TextBlock Text="Por padrão o áudio vai em Opus pela mesma conexão do vídeo, o que gasta bem menos banda e mantém som e imagem em sincronia. Marque esta opção se os seus amigos não estiverem ouvindo nada. Vale a partir da próxima transmissão." Foreground="#AAAAAA" FontSize="12" TextWrapping="Wrap" Margin="20,5,0,0"/>
-
                                     <TextBlock Text="Excluir o áudio de um programa" Foreground="White" FontSize="14" Margin="0,18,0,0"/>
                                     <TextBlock Text="O áudio deste programa não entra na transmissão — útil para o app de chamada de voz, evitando que seus amigos ouçam a si mesmos." Foreground="#AAAAAA" FontSize="12" TextWrapping="Wrap" Margin="0,4,0,6"/>
                                     <ComboBox x:Name="CboAudioExclusion" Height="30" FontSize="13"

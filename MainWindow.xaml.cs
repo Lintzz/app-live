@@ -176,7 +176,6 @@ namespace RadminStreamApp
                     System.Windows.MessageBox.Show(error, "Aviso - Captura de Áudio",
                         MessageBoxButton.OK, MessageBoxImage.Warning));
 
-            // No modo legado o audio e difundido pelo WebSocket, como antes da v1.0.18.
             _hostBroadcast.BinaryAudioReady += (data) => _server?.BroadcastBinary(data);
 
             _hostBroadcast.FrameReady += (pixels, width, height) =>
@@ -428,7 +427,6 @@ namespace RadminStreamApp
                 RoomPassword = _lastRoomPassword,
                 MaxPerformance = ChkMaxPerformance?.IsChecked == true,
                 ForceGdiCapture = ChkForceGdiCapture?.IsChecked == true,
-                LegacyAudio = ChkLegacyAudio?.IsChecked == true,
                 ExcludedAudioProcessId = ResolveExcludedAudioPid()
             });
         }
@@ -1083,16 +1081,6 @@ namespace RadminStreamApp
             else
             {
                 AudioExclusionWarning.Visibility = Visibility.Collapsed;
-            }
-        }
-
-        private void ChkLegacyAudio_Changed(object sender, RoutedEventArgs e)
-        {
-            // O caminho do audio e escolhido ao montar a transmissao, entao trocar durante
-            // uma live em andamento nao teria efeito; avisamos em vez de fingir que mudou.
-            if (_isBroadcasting)
-            {
-                ShowTransientStatus("O modo de áudio vale a partir da próxima transmissão.");
             }
         }
 

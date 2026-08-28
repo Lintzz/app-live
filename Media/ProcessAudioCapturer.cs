@@ -33,7 +33,7 @@ namespace RadminStreamApp
 
         /// <summary>
         /// Fired when a chunk of PCM audio data is available.
-        /// The byte[] contains raw PCM data at 48000 Hz, 16-bit, stereo.
+        /// The byte[] contains raw PCM data at 44100 Hz, 16-bit, stereo.
         /// </summary>
         public event Action<byte[]>? OnAudioFrameReady;
 
@@ -61,8 +61,8 @@ namespace RadminStreamApp
                 _callbackDelegate = new AudioCallbackDelegate(OnAudioDataReceived);
                 SetAudioCallback(_callbackDelegate);
 
-                // 48 kHz / estéreo: mesma taxa do loopback, para o Opus receber sempre
-                // o mesmo formato independentemente de qual caminho de captura está ativo.
+                // Mesma taxa do loopback, para o viewer receber sempre o mesmo formato
+                // independentemente de qual caminho de captura está ativo.
                 var result = StartCaptureAsync(processId, includeProcessTree,
                     AudioCapturer.Channels, AudioCapturer.SampleRate, 16);
 
