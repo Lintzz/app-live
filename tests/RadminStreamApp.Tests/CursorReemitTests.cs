@@ -4,65 +4,54 @@ using Xunit;
 namespace RadminStreamApp.Tests;
 
 /// <summary>
-/// Mover o mouse sobre uma tela parada não gera quadro novo no DXGI: a duplicação entrega o
-/// quadro com LastPresentTime zerado e o capturador o descarta, porque a imagem é a mesma.
+/// O DXGI só entrega quadro quando a imagem muda. Com a tela parada — e mover o mouse não
+/// conta como mudança para ele — o capturador reemite o último quadro, e o ritmo dessa
+/// reemissão é o piso de fps da transmissão inteira.
 ///
-/// O efeito era o cursor congelar no viewer e só saltar quando algum conteúdo mudasse — as
-/// "travadas do mouse". A correção é reemitir o último quadro num ritmo bem mais curto
-/// enquanto o cursor anda, em vez de esperar o intervalo do ocioso.
+/// Esse piso já foi 300ms, para poupar CPU. O efeito em campo era ruim nos dois sentidos: o
+/// cursor congelava sobre tela parada, e a transmissão caía para ~9 fps e parecia travada.
+/// Medido a 1080p com a tela parada: 300ms davam 8,7 fps a 5,5% de um núcleo; a cadência da
+/// captura dá 33,3 fps a 17,6%. O caminho GDI, que nunca teve freio, dava 30,8 fps a 42,7%.
 /// </summary>
 public class CursorReemitTests
 {
-    private static readonly TimeSpan CursorRate = TimeSpan.FromMilliseconds(33);
-    private static readonly TimeSpan IdleRate = TimeSpan.FromMilliseconds(300);
+    private static readonly TimeSpan CaptureCadence = TimeSpan.FromMilliseconds(16);
 
     [Fact]
-    public void MovingCursorDoesNotWaitForTheIdleInterval()
+    public void ReemitsAtTheCaptureCadence()
     {
-        // 50ms depois do último quadro, com o mouse andando: tem de sair quadro. Antes só
-        // sairia aos 300ms — e ainda assim sem redesenhar o cursor.
-        Assert.True(VideoCapturer.ShouldReemit(TimeSpan.FromMilliseconds(50), cursorMoved: true));
+        Assert.True(VideoCapturer.ShouldReemit(CaptureCadence));
+        Assert.True(VideoCapturer.ShouldReemit(TimeSpan.FromMilliseconds(20)));
+        Assert.True(VideoCapturer.ShouldReemit(TimeSpan.FromSeconds(1)));
     }
 
     [Fact]
-    public void StillCursorKeepsTheSlowIdleCadence()
+    public void DoesNotReemitTwiceWithinTheSameTick()
     {
-        // Nada mudou: reemitir a 30/s só gastaria banda. O quadro ocioso existe para dar
-        // keyframe a quem acabou de entrar, não para animar coisa nenhuma.
-        Assert.False(VideoCapturer.ShouldReemit(TimeSpan.FromMilliseconds(50), cursorMoved: false));
-        Assert.False(VideoCapturer.ShouldReemit(TimeSpan.FromMilliseconds(299), cursorMoved: false));
-        Assert.True(VideoCapturer.ShouldReemit(TimeSpan.FromMilliseconds(300), cursorMoved: false));
+        // Sem um piso, uma passagem mais rápida da captura reemitiria o mesmo quadro duas
+        // vezes seguidas, gastando encode para entregar imagem idêntica.
+        Assert.False(VideoCapturer.ShouldReemit(TimeSpan.Zero));
+        Assert.False(VideoCapturer.ShouldReemit(TimeSpan.FromMilliseconds(15)));
+    }
+
+    /// <summary>
+    /// O piso tem de ficar bem abaixo da percepção de travamento. Este teste falha se alguém
+    /// voltar a subir o intervalo para economizar CPU — foi exatamente o que fez a
+    /// transmissão parecer congelada com a tela parada.
+    /// </summary>
+    [Fact]
+    public void TheFloorStaysFastEnoughToLookLive()
+    {
+        // 50ms = 20 fps já é o limite do aceitável; nada acima disso pode passar.
+        Assert.True(VideoCapturer.ShouldReemit(TimeSpan.FromMilliseconds(50)),
+            "o piso de reemissão subiu: a transmissão volta a parecer travada com a tela parada");
     }
 
     [Fact]
-    public void MovingCursorIsStillRateLimited()
+    public void ACursorOnlyMoveStillProducesAFrame()
     {
-        // Sem piso, a captura de 16ms viraria reemissão a 60/s de um quadro quase idêntico.
-        Assert.False(VideoCapturer.ShouldReemit(TimeSpan.FromMilliseconds(10), cursorMoved: true));
-        Assert.False(VideoCapturer.ShouldReemit(TimeSpan.FromMilliseconds(32), cursorMoved: true));
-        Assert.True(VideoCapturer.ShouldReemit(CursorRate, cursorMoved: true));
-    }
-
-    [Fact]
-    public void CursorCadenceIsFasterThanIdleCadence()
-    {
-        // A relação entre os dois é o coração da correção; se alguém empatar os intervalos,
-        // a travada volta sem nenhum outro sintoma.
-        Assert.True(CursorRate < IdleRate);
-
-        var between = TimeSpan.FromMilliseconds(100);
-        Assert.True(VideoCapturer.ShouldReemit(between, cursorMoved: true));
-        Assert.False(VideoCapturer.ShouldReemit(between, cursorMoved: false));
-    }
-
-    [Theory]
-    [InlineData(0)]
-    [InlineData(5)]
-    public void NothingIsEmittedImmediatelyAfterTheLastFrame(int ms)
-    {
-        var since = TimeSpan.FromMilliseconds(ms);
-
-        Assert.False(VideoCapturer.ShouldReemit(since, cursorMoved: true));
-        Assert.False(VideoCapturer.ShouldReemit(since, cursorMoved: false));
+        // Mover o mouse não gera quadro novo no DXGI. Como a reemissão agora acontece a cada
+        // cadência de captura, o movimento do cursor sai junto sem precisar de caso especial.
+        Assert.True(VideoCapturer.ShouldReemit(TimeSpan.FromMilliseconds(33)));
     }
 }
