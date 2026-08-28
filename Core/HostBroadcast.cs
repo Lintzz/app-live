@@ -90,17 +90,46 @@ namespace RadminStreamApp
             _server?.BroadcastMessage("STREAM_STARTED");
         }
 
-        public void Stop()
+        /// <summary>
+        /// Encerra a live sem segurar a thread de UI. Simétrico ao <see cref="StartAsync"/>:
+        /// desmontar captura e encoder leva tempo — a de áudio chega a esperar a thread nativa
+        /// da ApplicationLoopback sair —, e fazer isso no clique do botão congelava a janela.
+        /// </summary>
+        public async Task StopAsync()
         {
-            if (_server != null)
+            AnnounceStop();
+
+            var manager = TakeStreamManager();
+            if (manager != null)
             {
-                _server.IsStreaming = false;
-                _server.BroadcastMessage("STREAM_STOPPED");
-                _server.RoomPassword = string.Empty;
+                await Task.Run(() => { try { manager.Stop(); } catch { } });
             }
 
+            IsBroadcasting = false;
+        }
+
+        /// <summary>Versão síncrona, para o fechamento da janela — onde não há mais UI a preservar.</summary>
+        public void Stop()
+        {
+            AnnounceStop();
             StopStreamManager();
             IsBroadcasting = false;
+        }
+
+        private void AnnounceStop()
+        {
+            if (_server == null) return;
+
+            _server.IsStreaming = false;
+            _server.BroadcastMessage("STREAM_STOPPED");
+            _server.RoomPassword = string.Empty;
+        }
+
+        private StreamManager? TakeStreamManager()
+        {
+            var manager = _streamManager;
+            _streamManager = null;
+            return manager;
         }
 
         /// <summary>Reflete mudanças feitas nas configurações com a live já no ar.</summary>

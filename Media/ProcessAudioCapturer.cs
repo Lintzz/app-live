@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Runtime.InteropServices;
 using System.Threading;
 using NAudio.Wave;
@@ -26,10 +27,29 @@ namespace RadminStreamApp
         [DllImport("ApplicationLoopback.dll", CallingConvention = CallingConvention.StdCall)]
         private static extern int StopCaptureAsync();
 
-        // Keep a reference to prevent GC from collecting the delegate
+        // A DLL guarda o ponteiro do callback num slot global e nunca o devolve, nem depois de
+        // parar a captura. Soltar a referência aqui deixaria o GC recolher o delegate com o
+        // nativo ainda apontando para ele — e aí a falha vira violação de acesso. Por isso a
+        // lista é estática e só cresce: são poucos bytes por transmissão.
+        private static readonly List<AudioCallbackDelegate> KeepAlive = new();
+        private static readonly object KeepAliveLock = new();
+
         private AudioCallbackDelegate? _callbackDelegate;
-        private bool _isCapturing = false;
+        private volatile bool _isCapturing = false;
         private bool _disposed = false;
+
+        // O StartCaptureAsync não é assíncrono apesar do nome: ele prende a thread que o chama
+        // durante toda a captura e — medido — nem o StopCaptureAsync o faz voltar. A captura
+        // para de verdade, mas a chamada nunca desenrola. Por isso ela vive numa thread própria,
+        // de fundo, que simplesmente é abandonada no encerramento.
+        private Thread? _captureThread;
+
+        /// <summary>
+        /// Janela para flagrar uma recusa do Windows: como o sucesso nunca retorna, uma volta
+        /// rápida da chamada nativa é justamente o sinal de falha. Uma recusa mais lenta que
+        /// isto ainda é reportada, só que pelo OnCaptureError.
+        /// </summary>
+        private static readonly TimeSpan StartupGracePeriod = TimeSpan.FromMilliseconds(500);
 
         /// <summary>
         /// Fired when a chunk of PCM audio data is available.
@@ -59,21 +79,44 @@ namespace RadminStreamApp
             {
                 // Set up the callback before starting capture
                 _callbackDelegate = new AudioCallbackDelegate(OnAudioDataReceived);
+                lock (KeepAliveLock) { KeepAlive.Add(_callbackDelegate); }
                 SetAudioCallback(_callbackDelegate);
 
-                // Mesma taxa do loopback, para o viewer receber sempre o mesmo formato
-                // independentemente de qual caminho de captura está ativo.
-                var result = StartCaptureAsync(processId, includeProcessTree,
-                    AudioCapturer.Channels, AudioCapturer.SampleRate, 16);
+                _isCapturing = true;
+                bool refused = false;
 
-                if (result == IntPtr.Zero)
+                _captureThread = new Thread(() =>
                 {
-                    OnCaptureError?.Invoke("Falha ao iniciar captura de áudio do processo. " +
-                        "Verifique se o Windows suporta essa funcionalidade (Windows 10 Build 20348+ ou Windows 11).");
-                    return false;
+                    try
+                    {
+                        // Mesma taxa do loopback, para o viewer receber sempre o mesmo formato
+                        // independentemente de qual caminho de captura está ativo.
+                        StartCaptureAsync(processId, includeProcessTree,
+                            AudioCapturer.Channels, AudioCapturer.SampleRate, 16);
+                    }
+                    catch { }
+
+                    // Chegar aqui só acontece quando o Windows recusa: no caminho bom a chamada
+                    // acima não volta nunca.
+                    refused = true;
+                    if (_isCapturing)
+                    {
+                        _isCapturing = false;
+                        OnCaptureError?.Invoke(StartFailureMessage);
+                    }
+                })
+                {
+                    IsBackground = true,
+                    Name = "ProcessAudioCapture"
+                };
+                _captureThread.Start();
+
+                if (_captureThread.Join(StartupGracePeriod) && refused)
+                {
+                    _captureThread = null;
+                    return false; // a mensagem já saiu pelo OnCaptureError, dentro da thread
                 }
 
-                _isCapturing = true;
                 return true;
             }
             catch (DllNotFoundException)
@@ -100,23 +143,35 @@ namespace RadminStreamApp
         /// </summary>
         public void StopCapture()
         {
-            if (!_isCapturing) return;
+            var thread = _captureThread;
+            _captureThread = null;
+
+            // Antes de tudo: a partir daqui nenhum quadro sai mais daqui, mesmo que a DLL
+            // ainda entregue algum durante o encerramento.
+            _isCapturing = false;
+
+            if (thread == null) return;
 
             try
             {
+                // Este volta em ~1 ms e a captura para de fato. A thread do start, porém,
+                // continua parada dentro da DLL para sempre — medido, segue presa 10 s depois.
+                // Não há o que esperar: ela é de fundo e some com o processo.
                 StopCaptureAsync();
             }
             catch { }
-
-            _isCapturing = false;
         }
+
+        private const string StartFailureMessage =
+            "Falha ao iniciar captura de áudio do processo. " +
+            "Verifique se o Windows suporta essa funcionalidade (Windows 10 Build 20348+ ou Windows 11).";
 
         /// <summary>
         /// Called by the native DLL when audio data is available.
         /// </summary>
         private void OnAudioDataReceived(IntPtr data, int length)
         {
-            if (length <= 0 || data == IntPtr.Zero) return;
+            if (!_isCapturing || length <= 0 || data == IntPtr.Zero) return;
 
             try
             {
@@ -153,7 +208,9 @@ namespace RadminStreamApp
             if (_disposed) return;
             _disposed = true;
             StopCapture();
-            _callbackDelegate = null;
+
+            // O _callbackDelegate NÃO é solto aqui: a DLL segue com o ponteiro dele mesmo
+            // depois de parar. Quem o mantém vivo é a lista estática lá em cima.
         }
     }
 }

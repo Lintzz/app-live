@@ -179,8 +179,10 @@ namespace RadminStreamApp
             }
 
             _hostBroadcast = new HostBroadcast(_server);
+            // InvokeAsync, e não Invoke: este aviso nasce na thread de captura, e um Invoke
+            // bloqueante trava as duas se a thread de UI já estiver esperando a captura parar.
             _hostBroadcast.AudioCaptureError += (error) =>
-                System.Windows.Application.Current.Dispatcher.Invoke(() =>
+                System.Windows.Application.Current.Dispatcher.InvokeAsync(() =>
                     System.Windows.MessageBox.Show(error, "Aviso - Captura de Áudio",
                         MessageBoxButton.OK, MessageBoxImage.Warning));
 
@@ -439,12 +441,14 @@ namespace RadminStreamApp
             });
         }
 
-        private void BtnStopStream_Click(object sender, RoutedEventArgs e)
+        private async void BtnStopStream_Click(object sender, RoutedEventArgs e)
         {
-            _hostBroadcast?.Stop();
-
+            // A janela volta ao estado "parado" na hora; a desmontagem vem logo atrás, fora da
+            // thread de UI. O botão de transmitir fica desabilitado nesse intervalo para não
+            // subir uma live nova por cima da que ainda está sendo encerrada.
             _isBroadcasting = false;
             BtnStartStream.Visibility = Visibility.Visible;
+            BtnStartStream.IsEnabled = false;
             BtnStopStream.Visibility = Visibility.Collapsed;
             BtnTogglePreview.Visibility = Visibility.Collapsed;
             BtnTogglePreview.IsChecked = false;
@@ -460,6 +464,13 @@ namespace RadminStreamApp
             StatusText.Text = "Sem sinal";
             StatusText.Visibility = Visibility.Visible;
             StatsOverlay.Visibility = Visibility.Collapsed;
+
+            if (_hostBroadcast != null)
+            {
+                await _hostBroadcast.StopAsync();
+            }
+
+            BtnStartStream.IsEnabled = true;
         }
 
         private void ApplyBroadcastMuteToSessions(bool broadcasting)
