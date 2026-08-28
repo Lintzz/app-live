@@ -69,8 +69,22 @@ namespace RadminStreamApp
         // 300ms e nao 500: com a tela parada, o keyframe pedido por quem acabou de entrar so
         // sai no proximo quadro emitido, entao este intervalo e o piso da espera por imagem.
         private static readonly TimeSpan IdleFrameInterval = TimeSpan.FromMilliseconds(300);
+
+        // Mover o mouse sobre uma tela parada não conta como quadro novo para o DXGI, então
+        // esse movimento só chegava ao viewer quando algum conteúdo mudasse: o cursor
+        // congelava e depois saltava. Com o cursor em movimento, o quadro é reemitido neste
+        // ritmo (~30/s) em vez de esperar os 300ms do ocioso.
+        private static readonly TimeSpan CursorMoveInterval = TimeSpan.FromMilliseconds(33);
+
         private TimeSpan _lastEmit = TimeSpan.MinValue;
         private bool _hasRealFrame;   // já veio pelo menos um quadro de verdade da tela
+
+        // Posição do cursor no último quadro emitido, para saber se ele se moveu.
+        private System.Drawing.Point _lastCursorPos = new(int.MinValue, int.MinValue);
+
+        // Pixels sob o cursor, guardados entre o desenho e a restauração. Reaproveitado:
+        // são poucos KB, mas seriam alocados 30x por segundo.
+        private byte[] _cursorPatch = Array.Empty<byte>();
 
         // O encoder precisa da duração real do quadro. Antes ia 16 ms fixo mesmo quando o
         // intervalo real era 40 ms, o que bagunçava os timestamps RTP no viewer.
@@ -273,7 +287,6 @@ namespace RadminStreamApp
 
             EnsureBuffers(width, height);
 
-            bool gotNewFrame;
             Bitmap source;
             Graphics sourceGraphics;
 
@@ -282,7 +295,6 @@ namespace RadminStreamApp
                 source = _captureBitmap!;
                 sourceGraphics = _captureGraphics!;
                 _hasRealFrame = true;
-                gotNewFrame = true;
             }
             else if (_duplicationUnavailable)
             {
@@ -290,7 +302,6 @@ namespace RadminStreamApp
                 source = _gdiBitmap!;
                 sourceGraphics = _gdiGraphics!;
                 _hasRealFrame = true;
-                gotNewFrame = true;
             }
             else
             {
@@ -301,17 +312,45 @@ namespace RadminStreamApp
                 // zerado e reemiti-lo transmitiria uma tela preta — e ainda enganaria o
                 // watchdog abaixo, que usa _hasRealFrame para decidir se o DXGI funciona.
                 if (!_hasRealFrame) return;
-                if (_lastEmit != TimeSpan.MinValue && _frameClock.Elapsed - _lastEmit < IdleFrameInterval) return;
+                if (_lastEmit != TimeSpan.MinValue &&
+                    !ShouldReemit(_frameClock.Elapsed - _lastEmit, CursorMovedSinceLastEmit(bounds)))
+                {
+                    return;
+                }
 
                 source = _captureBitmap!;
                 sourceGraphics = _captureGraphics!;
-                gotNewFrame = false;
             }
 
-            // Só no quadro novo: o buffer do DXGI só é reescrito quando há imagem nova, então
-            // redesenhar na reemissão deixaria um rastro de cursores acumulados.
-            if (gotNewFrame) DrawCursor(sourceGraphics, left, top);
+            // O cursor entra em TODO quadro emitido, inclusive nas reemissões — é o que faz o
+            // mouse andar liso sobre uma tela parada.
+            //
+            // O buffer do DXGI só é reescrito quando há imagem nova, então desenhar nele
+            // deixaria um rastro de cursores acumulados nas reemissões. Por isso o retângulo
+            // sob o cursor é guardado antes e devolvido depois: o buffer volta intacto e a
+            // próxima reemissão parte de novo da imagem limpa.
+            bool restoreCursorArea = ReferenceEquals(source, _captureBitmap) && _captureBuffer != null;
+            Rectangle savedRect = Rectangle.Empty;
+            if (restoreCursorArea) restoreCursorArea = TrySaveUnderCursor(left, top, out savedRect);
 
+            try
+            {
+                DrawCursor(sourceGraphics, left, top);
+                ComposeAndEmit(source, width, height);
+            }
+            finally
+            {
+                if (restoreCursorArea) RestoreUnderCursor(savedRect);
+            }
+        }
+
+        /// <summary>
+        /// Escala se preciso, copia para o buffer de saída e entrega o quadro. Separado do
+        /// <see cref="CaptureFrameCore"/> para o retângulo do cursor poder ser devolvido num
+        /// finally, sem que os vários returns daqui pulem a restauração.
+        /// </summary>
+        private void ComposeAndEmit(Bitmap source, int width, int height)
+        {
             // Escala se passar do limite; dimensões múltiplas de 4 evitam padding de stride.
             float scale = 1.0f;
             if (width > _maxWidth || height > _maxHeight)
@@ -365,6 +404,10 @@ namespace RadminStreamApp
             _lastFrameTicks = nowTicks;
 
             _lastEmit = _frameClock.Elapsed;
+            // Guardado só quando o quadro realmente sai: se marcássemos na leitura, um quadro
+            // descartado adiante faria o movimento seguinte do cursor parecer "já enviado".
+            _lastCursorPos = CursorPosition() ?? new System.Drawing.Point(int.MinValue, int.MinValue);
+
             handler(durationMs, outWidth, outHeight, output, VideoPixelFormatsEnum.Bgra);
         }
 
@@ -424,6 +467,96 @@ namespace RadminStreamApp
 
             _gdiGraphics.CopyFromScreen(left, top, 0, 0, new Size(width, height), CopyPixelOperation.SourceCopy);
             return true;
+        }
+
+        [DllImport("user32.dll")]
+        static extern int GetSystemMetrics(int nIndex);
+
+        private const int SM_CXCURSOR = 13;
+        private const int SM_CYCURSOR = 14;
+
+        /// <summary>Posição do cursor em coordenadas de desktop, ou null se está escondido.</summary>
+        private static System.Drawing.Point? CursorPosition()
+        {
+            CURSORINFO pci;
+            pci.cbSize = Marshal.SizeOf(typeof(CURSORINFO));
+            if (!GetCursorInfo(out pci) || pci.flags != CURSOR_SHOWING) return null;
+            return new System.Drawing.Point(pci.ptScreenPos.x, pci.ptScreenPos.y);
+        }
+
+        /// <summary>
+        /// O cursor mudou de lugar dentro do monitor capturado desde o último quadro emitido?
+        /// Movimento em outra tela não conta: reemitir por causa dele gastaria banda para
+        /// entregar um quadro idêntico.
+        /// </summary>
+        private bool CursorMovedSinceLastEmit(Rectangle bounds)
+        {
+            var pos = CursorPosition();
+            if (pos == null) return false;
+            if (!bounds.Contains(pos.Value)) return false;
+
+            return pos.Value != _lastCursorPos;
+        }
+
+        /// <summary>
+        /// Vale reemitir o último quadro agora? Com o cursor andando, o ritmo é bem mais curto
+        /// que o do ocioso — é essa diferença que tira a travada do mouse sobre tela parada.
+        /// </summary>
+        internal static bool ShouldReemit(TimeSpan sinceLastEmit, bool cursorMoved)
+            => sinceLastEmit >= (cursorMoved ? CursorMoveInterval : IdleFrameInterval);
+
+        /// <summary>
+        /// Guarda os pixels que o cursor vai cobrir, para devolvê-los depois de o quadro sair.
+        /// Sem isso, cada reemissão empilharia mais um cursor no buffer do DXGI.
+        /// </summary>
+        private bool TrySaveUnderCursor(int left, int top, out Rectangle rect)
+        {
+            rect = Rectangle.Empty;
+
+            var pos = CursorPosition();
+            if (pos == null || _captureBuffer == null) return false;
+
+            // Uma margem generosa em volta do ponto: cobre o hotspot e cursores grandes
+            // (lupa, acessibilidade) sem depender de medir o ícone a cada quadro.
+            int w = Math.Max(GetSystemMetrics(SM_CXCURSOR), 32) * 2;
+            int h = Math.Max(GetSystemMetrics(SM_CYCURSOR), 32) * 2;
+
+            var candidate = new Rectangle(pos.Value.X - left - w / 2, pos.Value.Y - top - h / 2, w, h);
+            candidate.Intersect(new Rectangle(0, 0, _bufferWidth, _bufferHeight));
+            if (candidate.Width <= 0 || candidate.Height <= 0) return false;
+
+            int needed = candidate.Width * candidate.Height * BytesPerPixel;
+            if (_cursorPatch.Length < needed) _cursorPatch = new byte[needed];
+
+            CopyRect(_captureBuffer, _bufferWidth, candidate, _cursorPatch, toPatch: true);
+            rect = candidate;
+            return true;
+        }
+
+        private void RestoreUnderCursor(Rectangle rect)
+        {
+            if (_captureBuffer == null || rect.Width <= 0) return;
+            CopyRect(_captureBuffer, _bufferWidth, rect, _cursorPatch, toPatch: false);
+        }
+
+        /// <summary>
+        /// Move um retângulo entre o buffer de captura e o guardado, nos dois sentidos.
+        /// Estático e testável de propósito: é aritmética de stride, e um deslize aqui não
+        /// quebra o build — corrompe a imagem transmitida.
+        /// </summary>
+        internal static void CopyRect(byte[] buffer, int bufferWidth, Rectangle rect, byte[] patch, bool toPatch)
+        {
+            int stride = bufferWidth * BytesPerPixel;
+            int rowBytes = rect.Width * BytesPerPixel;
+
+            for (int y = 0; y < rect.Height; y++)
+            {
+                int bufferOffset = (rect.Y + y) * stride + rect.X * BytesPerPixel;
+                int patchOffset = y * rowBytes;
+
+                if (toPatch) Buffer.BlockCopy(buffer, bufferOffset, patch, patchOffset, rowBytes);
+                else Buffer.BlockCopy(patch, patchOffset, buffer, bufferOffset, rowBytes);
+            }
         }
 
         private static void DrawCursor(Graphics g, int left, int top)
