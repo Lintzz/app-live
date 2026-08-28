@@ -1,4 +1,5 @@
 ; version.iss é gerado pelo build a partir de <Version> no .csproj — não editar à mão.
+; Caminhos são relativos a esta pasta (build/); a raiz do repositório é "..".
 #include "version.iss"
 
 [Setup]
@@ -9,14 +10,14 @@ DefaultGroupName=Radmin Stream Live
 UninstallDisplayIcon={app}\RadminStreamApp.exe
 Compression=lzma2
 SolidCompression=yes
-OutputDir=.
+OutputDir=..
 OutputBaseFilename=RadminStream_Setup
 ArchitecturesAllowed=x64
 ArchitecturesInstallIn64BitMode=x64
-SetupIconFile=app_icon.ico
+SetupIconFile=..\src\RadminStreamApp\Assets\app_icon.ico
 
 [Files]
-Source: "publish_zip\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "..\publish_zip\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
 Name: "{group}\Radmin Stream Live"; Filename: "{app}\RadminStreamApp.exe"; WorkingDir: "{app}"

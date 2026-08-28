@@ -5,8 +5,8 @@ publish_zip/
 .dotnet/
 TestResults/
 
-# Temporários do build WPF: o MSBuild cria projetos "_wpftmp" na raiz e nem sempre
-# apaga quando a compilação é interrompida.
+# Temporários do build WPF: o MSBuild cria projetos "_wpftmp" ao lado do .csproj e
+# nem sempre apaga quando a compilação é interrompida.
 *_wpftmp.csproj
 
 # Arquivos locais e de cache
@@ -17,17 +17,18 @@ TestResults/
 .vs/
 .vscode/
 .idea/
-.claude/
+
+# Configuração local do Claude Code, exceto as skills do projeto (essas são versionadas).
+.claude/*
+!.claude/skills/
 
 # Lixo do Explorer do Windows
 Thumbs.db
 desktop.ini
 
-# Instalador gerado
-RadminStream_Setup.exe
+# Instalador gerado e seu arquivo de verificação, na raiz (OutputDir do setup.iss)
+/RadminStream_Setup.exe
+/RadminStream_Setup.exe.sha256
 
 # Gerado pelo build a partir de <Version> no .csproj
-version.iss
-
-# Arquivo de verificação publicado junto do instalador
-*.sha256
+/build/version.iss

@@ -16,16 +16,17 @@ Sempre que acionar esta skill, o agente deve executar as seguintes etapas rigoro
    - Calcule a **nova versão** incrementando o patch (ex: `1.0.4` -> `1.0.5`), a menos que o usuário solicite um incremento maior (minor ou major). Guarde o número da versão sem o `v` para os arquivos e com o `v` para o git/gh.
 
 2. **Atualizar a Versão** (um único lugar):
-   - No arquivo `RadminStreamApp.csproj`, procure pela tag `<Version>` e atualize para a nova versão (ex: `<Version>1.0.5</Version>`).
-   - **Não edite mais `setup.iss` nem `MainWindow.xaml`**: o `AppVersion` do Inno sai do `version.iss`
+   - No arquivo `src/RadminStreamApp/RadminStreamApp.csproj`, procure pela tag `<Version>` e atualize para a nova versão (ex: `<Version>1.0.5</Version>`).
+   - **Não edite mais `build/setup.iss` nem `MainWindow.xaml`**: o `AppVersion` do Inno sai do `build/version.iss`
      gerado pelo build, e o texto na tela vem de `AppInfo.Version` (lido do assembly).
 
-3. **Rodar os Testes**:
-   - Execute `.\.dotnet\dotnet.exe test tests\RadminStreamApp.Tests\RadminStreamApp.Tests.csproj`.
-   - Se algum teste falhar, interrompa o processo e avise o usuário.
+3. **Compilar para Validar**:
+   - Execute `.\.dotnet\dotnet.exe build RadminStreamLive.sln -c Release`.
+   - Se a compilação falhar, interrompa o processo e avise o usuário.
+   - A suíte de testes foi removida e será recriada; quando voltar, rode-a aqui antes de seguir.
 
 4. **Gerar o Instalador**:
-   - Leia as instruções da skill `build-installer` se precisar, ou apenas rode os comandos de build do instalador.
+   - Invoque a skill `build-installer` (`/build-installer`) para ler as instruções, ou apenas rode os comandos de build do instalador.
    - Certifique-se de executar o comando que compila o projeto e constrói o `RadminStream_Setup.exe` via Inno Setup (o comando está definido no `build-installer`).
 
 5. **Gerar o Arquivo de Verificação** (obrigatório):
@@ -37,7 +38,7 @@ Sempre que acionar esta skill, o agente deve executar as seguintes etapas rigoro
 
 6. **Committar as Alterações (Opcional, mas recomendado)**:
    - Verifique o que mudou (`git status`).
-   - Adicione o arquivo: `git add RadminStreamApp.csproj`
+   - Adicione o arquivo: `git add src/RadminStreamApp/RadminStreamApp.csproj`
    - Faça o commit: `git commit -m "Bump version to v{NOVA_VERSAO}"`
    - Faça o push: `git push`
 

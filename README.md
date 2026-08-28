@@ -47,6 +47,7 @@ Para compilar e gerar o instalador do projeto, você precisará das seguintes fe
    por `dotnet`, ou recrie a pasta com o
    [script oficial da Microsoft](https://dot.net/v1/dotnet-install.ps1):
    `.\dotnet-install.ps1 -Channel 8.0 -InstallDir .dotnet`
+   O `global.json` fixa a linha 8.0: um SDK mais novo instalado na máquina não é usado por engano.
 2. **Inno Setup 6**: Necessário para gerar o arquivo `.exe` de instalação (`setup.exe`).
    - Pode ser instalado via WinGet: `winget install JRSoftware.InnoSetup`
    - Ou baixado diretamente em: [jrsoftware.org](https://jrsoftware.org/isdl.php)
@@ -60,7 +61,7 @@ O processo de compilação foi automatizado para rodar em uma única linha de co
 Abra o terminal **PowerShell** na pasta raiz do projeto e execute:
 
 ```powershell
-if (Test-Path "publish_zip") { Remove-Item -Recurse -Force "publish_zip" } ; & ".\.dotnet\dotnet.exe" publish RadminStreamApp.csproj -c Release -r win-x64 --self-contained true -o "publish_zip" ; & "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe" setup.iss
+if (Test-Path "publish_zip") { Remove-Item -Recurse -Force "publish_zip" } ; & ".\.dotnet\dotnet.exe" publish src\RadminStreamApp\RadminStreamApp.csproj -c Release -r win-x64 --self-contained true -o "publish_zip" ; & "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe" build\setup.iss
 ```
 
 > 💡 **Dica:** Caso o `ISCC.exe` não seja encontrado no diretório local durante a compilação, verifique se o Inno Setup foi instalado globalmente em `C:\Program Files (x86)\Inno Setup 6\ISCC.exe` e ajuste o caminho no comando acima.
@@ -71,19 +72,45 @@ O instalador final será gerado na raiz do projeto com o nome **`RadminStream_Se
 
 ## 📁 Estrutura do Projeto
 
-- `RadminStreamApp.csproj`: Arquivo principal do projeto C# WPF.
-- `setup.iss`: Script de configuração do Inno Setup utilizado para gerar o instalador final.
-- `publish_zip/`: Diretório temporário gerado durante a publicação (criado e apagado automaticamente).
-- `tests/RadminStreamApp.Tests/`: suíte de testes (xUnit). Rode com
-  `.\.dotnet\dotnet.exe test tests\RadminStreamApp.Tests\RadminStreamApp.Tests.csproj`.
-- `docs/`: documentos de planejamento.
-- `version.iss`: gerado pelo build a partir de `<Version>` no `.csproj` — **não editar à mão**.
-- **Bibliotecas Importantes**:
-  - `Fleck` (WebSocket)
-  - `NAudio` (Áudio)
-  - `SIPSorcery` (WebRTC — vídeo H.264)
-  - `Vortice.Direct3D11` / `Vortice.DXGI` (captura de tela via Desktop Duplication)
-  - A DLL `ApplicationLoopback.dll` é preservada para fornecer suporte à captura de áudio específica por processo.
+```
+.
+├── RadminStreamLive.sln          # Solução (um projeto hoje; ponto de entrada do build)
+├── global.json                   # Fixa o SDK na linha 8.0
+├── build/
+│   ├── setup.iss                 # Script do Inno Setup; caminhos relativos a esta pasta
+│   └── version.iss               # Gerado pelo build a partir de <Version> — não editar
+├── src/
+│   └── RadminStreamApp/
+│       ├── RadminStreamApp.csproj
+│       ├── App.xaml(.cs)         # Entrada do WPF e captura global de exceções
+│       ├── Assets/               # app_icon.ico
+│       ├── Core/                 # StreamManager, HostBroadcast, ViewerSession, cripto, updates
+│       ├── Helpers/              # Enumeração de monitores (Win32)
+│       ├── Media/                # Captura de tela (DXGI/GDI) e de áudio (WASAPI/por processo)
+│       ├── Models/               # Friend
+│       ├── Network/              # SignalingServer / SignalingClient / SignalingMessage
+│       ├── Services/             # Persistência (amigos, settings) e status dos amigos
+│       ├── Views/                # MainWindow, PipWindow, StreamTab e os diálogos
+│       ├── FFmpegLibs/           # DLLs do FFmpeg (Git LFS)
+│       └── NativeLibs/           # ApplicationLoopback.dll (captura de áudio por processo)
+└── publish_zip/                  # Saída do publish, consumida pelo instalador (gerada)
+```
+
+O instalador final sai na raiz como **`RadminStream_Setup.exe`**.
+
+> ⚠️ **Não há suíte de testes no momento.** A anterior (xUnit, cobrindo cripto, serviços e o
+> handshake de sala) foi removida na reorganização e será recriada sob `tests/`.
+
+**Bibliotecas importantes**
+
+| Biblioteca | Papel |
+|---|---|
+| `Fleck` | Servidor WebSocket (sinalização, lado host) |
+| `Websocket.Client` | Cliente WebSocket (lado viewer) |
+| `NAudio` | Captura e reprodução de áudio |
+| `SIPSorcery` + `SIPSorceryMedia.FFmpeg` | WebRTC e codec H.264 |
+| `Vortice.Direct3D11` / `Vortice.DXGI` | Captura de tela via Desktop Duplication |
+| `ApplicationLoopback.dll` | Captura de áudio por processo (DLL nativa, P/Invoke) |
 
 ---
 
@@ -116,16 +143,18 @@ reserva automática para máquinas onde a duplicação não está disponível (R
 
 ## 📦 Peso do repositório
 
-As DLLs do FFmpeg em `FFmpegLibs/` somam ~145 MB e estão no histórico do Git. O `.gitattributes`
-já as marca como LFS, o que evita que **futuras** atualizações delas engordem o histórico.
+As DLLs do FFmpeg em `src/RadminStreamApp/FFmpegLibs/` somam ~145 MB e **já vivem no Git LFS**,
+histórico incluído — o pack do repositório tem menos de 200 KB.
 
-Para remover os blobs já commitados é preciso **reescrever o histórico** — operação destrutiva,
-que invalida todos os clones existentes. Se for o caso, com todos avisados:
+Por isso, **é preciso ter o `git-lfs` instalado antes de clonar**. Sem ele o working tree recebe
+ponteiros de texto no lugar das DLLs e o build falha ao carregar o FFmpeg:
 
 ```powershell
-git lfs migrate import --include="FFmpegLibs/*.dll" --everything
-git push --force-with-lease --all
+winget install GitHub.GitLFS
+git lfs install
 ```
+
+Num clone que já veio sem as DLLs, `git lfs pull` resolve.
 
 ---
 

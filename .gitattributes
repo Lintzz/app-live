@@ -1,9 +1,9 @@
-# As DLLs do FFmpeg somam ~145 MB. O histórico foi migrado para LFS, então tanto as
-# revisões antigas quanto as futuras ficam fora dos objetos do Git.
+# As DLLs do FFmpeg somam ~145 MB e vivem no Git LFS desde a migração do histórico:
+# tanto as revisões antigas quanto as futuras ficam fora dos objetos do Git.
 #
 # Depois de clonar, é preciso ter o git-lfs instalado — sem ele o working tree recebe
 # ponteiros de texto no lugar das DLLs e o build falha ao carregar o FFmpeg.
-FFmpegLibs/*.dll filter=lfs diff=lfs merge=lfs -text
+src/RadminStreamApp/FFmpegLibs/*.dll filter=lfs diff=lfs merge=lfs -text
 
 # Binários que não devem sofrer normalização de fim de linha.
 *.dll binary

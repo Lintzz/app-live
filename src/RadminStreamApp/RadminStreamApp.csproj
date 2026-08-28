@@ -10,20 +10,12 @@
     <UseWindowsForms>true</UseWindowsForms>
     <Version>1.0.25</Version>
     <!-- Version é a única fonte da verdade: AssemblyVersion, o texto na UI e o AppVersion
-         do Inno Setup saem todos daqui (o version.iss é gerado no build). -->
+         do Inno Setup saem todos daqui (o build/version.iss é gerado no build). -->
     <AssemblyVersion>$(Version)</AssemblyVersion>
     <FileVersion>$(Version)</FileVersion>
-    <ApplicationIcon>app_icon.ico</ApplicationIcon>
+    <ApplicationIcon>Assets\app_icon.ico</ApplicationIcon>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
   </PropertyGroup>
-
-  <!-- O projeto de testes vive dentro da pasta do app; sem isto o glob padrão do SDK
-       compilaria os testes junto do executável. -->
-  <ItemGroup>
-    <Compile Remove="tests/**" />
-    <None Remove="tests/**" />
-    <Page Remove="tests/**" />
-  </ItemGroup>
 
   <ItemGroup>
     <PackageReference Include="Fleck" Version="1.2.0" />
@@ -37,24 +29,26 @@
     <PackageReference Include="Websocket.Client" Version="5.5.0" />
   </ItemGroup>
 
+  <!-- Bibliotecas nativas. O <Link> achata cada uma na raiz da saída: o P/Invoke da
+       ApplicationLoopback e o FFmpeg carregam pelo nome, ao lado do executável. -->
   <ItemGroup>
-    <None Update="ApplicationLoopback.dll">
+    <None Update="NativeLibs\ApplicationLoopback.dll">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Link>%(Filename)%(Extension)</Link>
     </None>
     <None Update="FFmpegLibs\*.dll">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       <Link>%(Filename)%(Extension)</Link>
     </None>
-    <Resource Include="app_icon.ico" />
+    <Resource Include="Assets\app_icon.ico" />
   </ItemGroup>
 
-  <!-- Mantém o instalador em sincronia com a versão do projeto (setup.iss dá #include nele). -->
+  <!-- Mantém o instalador em sincronia com a versão do projeto (build/setup.iss dá #include nele). -->
   <Target Name="GenerateInnoSetupVersion" BeforeTargets="Build;Publish">
-    <WriteLinesToFile File="$(MSBuildProjectDirectory)/version.iss"
+    <WriteLinesToFile File="$(MSBuildProjectDirectory)/../../build/version.iss"
                       Lines="#define AppVersion &quot;$(Version)&quot;"
                       Overwrite="true"
                       WriteOnlyWhenDifferent="true" />
   </Target>
 
 </Project>
-

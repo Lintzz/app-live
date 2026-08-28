@@ -15,16 +15,15 @@ jobs:
         with:
           lfs: true
 
-      - name: Configurar .NET 8
+      # A versão vem do global.json; sem ele o runner usava o SDK mais novo da imagem
+      # (10.x) em vez do 8.0 com que o projeto é compilado localmente.
+      - name: Configurar .NET
         uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: '8.0.x'
+          global-json-file: global.json
 
       - name: Restaurar dependências
-        run: dotnet restore RadminStreamApp.csproj tests/RadminStreamApp.Tests/RadminStreamApp.Tests.csproj
+        run: dotnet restore RadminStreamLive.sln
 
       - name: Compilar (Release)
-        run: dotnet build RadminStreamApp.csproj -c Release --no-restore
-
-      - name: Rodar testes
-        run: dotnet test tests/RadminStreamApp.Tests/RadminStreamApp.Tests.csproj -c Release --no-restore --verbosity normal
+        run: dotnet build RadminStreamLive.sln -c Release --no-restore

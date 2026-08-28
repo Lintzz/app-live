@@ -15,7 +15,7 @@ Esta skill automatiza o processo de compilação do `RadminStreamApp` e geraçã
 Para acionar a construção, sempre execute o seguinte comando PowerShell na raiz do projeto:
 
 ```powershell
-if (Test-Path "publish_zip") { Remove-Item -Recurse -Force "publish_zip" } ; & ".\.dotnet\dotnet.exe" publish RadminStreamApp.csproj -c Release -r win-x64 --self-contained true -o "publish_zip" ; & "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe" setup.iss
+if (Test-Path "publish_zip") { Remove-Item -Recurse -Force "publish_zip" } ; & ".\.dotnet\dotnet.exe" publish src\RadminStreamApp\RadminStreamApp.csproj -c Release -r win-x64 --self-contained true -o "publish_zip" ; & "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe" build\setup.iss
 ```
 
 Caso o `ISCC.exe` não seja encontrado no diretório local, procure em `C:\Program Files (x86)\Inno Setup 6\ISCC.exe`.
