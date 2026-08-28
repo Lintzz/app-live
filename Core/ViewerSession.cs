@@ -94,7 +94,12 @@ namespace RadminStreamApp
         /// <summary>Ícone Segoe MDL2: alto-falante normal ou mudo.</summary>
         public string MuteIcon => IsMuted ? "" : "";
 
-        public string StatsText => $"📥 {Fps}fps | {LatencyMs}ms";
+        private int _audioFps;
+        /// <summary>Quadros de audio decodificados por segundo. Zero com video rodando aponta
+        /// o problema para o audio, e nao para a conexao.</summary>
+        public int AudioFps { get => _audioFps; private set { if (SetProperty(ref _audioFps, value)) RaisePropertyChanged(nameof(StatsText)); } }
+
+        public string StatsText => $"📥 {Fps}fps | {LatencyMs}ms | 🔊 {AudioFps}/s";
 
         public ViewerSession(Friend friend)
         {
@@ -176,6 +181,9 @@ namespace RadminStreamApp
                 if (_streamManager != null)
                     await _streamManager.HandleSignalingMessage("host", message);
             };
+
+            // Modo legado: o audio chega como PCM pelo proprio WebSocket.
+            _client.OnBinaryReceived += (data) => _streamManager?.ProcessReceivedBinary(data);
 
             _client.OnConnected += async (isReconnect) =>
             {
@@ -278,6 +286,7 @@ namespace RadminStreamApp
 
             _streamManager.OnLocalSdpReady += (clientId, sdpJson) => _client?.SendMessage(sdpJson);
             _streamManager.OnViewerFpsUpdated += (fps) => Fps = fps;
+            _streamManager.OnAudioStatsUpdated += (frames) => AudioFps = frames;
 
             await _streamManager.InitializeClient();
         }

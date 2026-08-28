@@ -63,6 +63,8 @@ namespace RadminStreamApp
         // Evita que sincronizar o estado visual dos toggles dispare os handlers de novo.
         private bool _syncingToggles;
         private bool _isBroadcasting;
+        private string _hostVideoStats = string.Empty;
+        private string _hostAudioStats = string.Empty;
 
         private int _gridColumns = 1;
         /// <summary>Colunas da grade de lives — 1 live ocupa tudo, 2 lado a lado, 3-4 em 2x2, 5+ em 3 colunas.</summary>
@@ -174,6 +176,9 @@ namespace RadminStreamApp
                     System.Windows.MessageBox.Show(error, "Aviso - Captura de Áudio",
                         MessageBoxButton.OK, MessageBoxImage.Warning));
 
+            // No modo legado o audio e difundido pelo WebSocket, como antes da v1.0.18.
+            _hostBroadcast.BinaryAudioReady += (data) => _server?.BroadcastBinary(data);
+
             _hostBroadcast.FrameReady += (pixels, width, height) =>
             {
                 UpdateHostBitmap(pixels, width, height);
@@ -184,8 +189,20 @@ namespace RadminStreamApp
             _hostBroadcast.StatsUpdated += (fps, kbps) =>
                 System.Windows.Application.Current.Dispatcher.InvokeAsync(() =>
                 {
+                    _hostVideoStats = $"📤 {fps}fps | {kbps:F1} kbps";
                     StatsOverlay.Visibility = Visibility.Visible;
-                    StatsText.Text = $"📤 {fps}fps | {kbps:F1} kbps";
+                    StatsText.Text = _hostVideoStats + _hostAudioStats;
+                });
+
+            // Sem viewer conectado nao ha audio a enviar, entao o contador so diz algo
+            // quando alguem esta assistindo.
+            _hostBroadcast.AudioStatsUpdated += (frames) =>
+                System.Windows.Application.Current.Dispatcher.InvokeAsync(() =>
+                {
+                    _hostAudioStats = _server?.ConnectedClientsCount > 0
+                        ? $" | 🔊 {frames}/s"
+                        : string.Empty;
+                    StatsText.Text = _hostVideoStats + _hostAudioStats;
                 });
 
             SyncAllowedIps();
@@ -411,6 +428,7 @@ namespace RadminStreamApp
                 RoomPassword = _lastRoomPassword,
                 MaxPerformance = ChkMaxPerformance?.IsChecked == true,
                 ForceGdiCapture = ChkForceGdiCapture?.IsChecked == true,
+                LegacyAudio = ChkLegacyAudio?.IsChecked == true,
                 ExcludedAudioProcessId = ResolveExcludedAudioPid()
             });
         }
@@ -1065,6 +1083,16 @@ namespace RadminStreamApp
             else
             {
                 AudioExclusionWarning.Visibility = Visibility.Collapsed;
+            }
+        }
+
+        private void ChkLegacyAudio_Changed(object sender, RoutedEventArgs e)
+        {
+            // O caminho do audio e escolhido ao montar a transmissao, entao trocar durante
+            // uma live em andamento nao teria efeito; avisamos em vez de fingir que mudou.
+            if (_isBroadcasting)
+            {
+                ShowTransientStatus("O modo de áudio vale a partir da próxima transmissão.");
             }
         }
 

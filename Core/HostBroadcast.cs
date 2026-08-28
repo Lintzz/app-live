@@ -10,6 +10,7 @@ namespace RadminStreamApp
         public string RoomPassword { get; init; } = string.Empty;
         public bool MaxPerformance { get; init; } = true;
         public bool ForceGdiCapture { get; init; }
+        public bool LegacyAudio { get; init; }
         public uint ExcludedAudioProcessId { get; init; }
         public int Width { get; init; } = 1920;
         public int Height { get; init; } = 1080;
@@ -33,7 +34,14 @@ namespace RadminStreamApp
         /// <summary>(fps, kbps) uma vez por segundo.</summary>
         public event Action<int, double>? StatsUpdated;
 
+        /// <summary>Quadros de audio enviados por segundo. Zero com viewer conectado
+        /// significa que o audio nao esta saindo daqui.</summary>
+        public event Action<int>? AudioStatsUpdated;
+
         public event Action<string>? AudioCaptureError;
+
+        /// <summary>Audio PCM para difundir pelo WebSocket (somente no modo legado).</summary>
+        public event Action<byte[]>? BinaryAudioReady;
 
         public bool IsBroadcasting { get; private set; }
 
@@ -59,6 +67,9 @@ namespace RadminStreamApp
             manager.OnLocalSdpReady += (clientId, sdpJson) => _server?.SendToClient(clientId, sdpJson);
             manager.OnLocalVideoFrameReady += (pixels, width, height, stride) => FrameReady?.Invoke(pixels, width, height);
             manager.OnHostStatsUpdated += (fps, kbps) => StatsUpdated?.Invoke(fps, kbps);
+            manager.OnAudioStatsUpdated += (frames) => AudioStatsUpdated?.Invoke(frames);
+            manager.OnBinaryDataReady += (data) => BinaryAudioReady?.Invoke(data);
+            manager.SetLegacyAudio(settings.LegacyAudio);
 
             if (_server != null)
             {

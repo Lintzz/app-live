@@ -59,6 +59,23 @@ namespace RadminStreamApp
 
         private readonly AudioEncoder _audioEncoder = new AudioEncoder(includeLinearFormats: false, includeOpus: true);
         private readonly AudioFormat _opusFormat;
+
+        // Formato realmente acordado no SDP. Codificar com o formato local sem conferir a
+        // negociacao e o que faz o SendAudio falhar calado: o payload combinado pode nao ser
+        // o que assumimos, e ate a negociacao terminar nao ha para onde mandar audio.
+        private AudioFormat? _negotiatedAudioFormat;
+
+        // Caminho de audio anterior a v1.0.18: PCM cru pelo WebSocket. Gasta muito mais banda
+        // e nao sincroniza com o video, mas e o caminho que comprovadamente funcionava.
+        // Fica disponivel como alternativa enquanto o Opus/WebRTC nao for confirmado em campo.
+        private bool _useLegacyAudio;
+
+        // Contadores expostos na sobreposicao de estatisticas. Sem eles, "o som nao funciona"
+        // nao distingue captura, codificacao, transporte e reproducao.
+        private int _audioFramesSent;
+        private int _audioFramesDecoded;
+        private int _audioFailures;
+        private string? _audioFailureReason;
         private readonly List<byte> _pcmAccumulator = new List<byte>();
         private readonly object _pcmLock = new object();
 
@@ -74,6 +91,12 @@ namespace RadminStreamApp
 
         public event Action<int, double>? OnHostStatsUpdated; // fps, kbps
         public event Action<int>? OnViewerFpsUpdated; // fps
+
+        /// <summary>Quadros de audio por segundo — enviados no host, decodificados no viewer.</summary>
+        public event Action<int>? OnAudioStatsUpdated;
+
+        /// <summary>Audio PCM para difusao pelo WebSocket (somente no modo legado).</summary>
+        public event Action<byte[]>? OnBinaryDataReady;
 
         private System.Threading.Timer? _hostStatsTimer;
         private System.Threading.Timer? _viewerStatsTimer;
@@ -205,6 +228,18 @@ namespace RadminStreamApp
         /// </summary>
         private void OnCapturedPcm(byte[] pcm)
         {
+            if (_useLegacyAudio)
+            {
+                // Caminho legado: o PCM vai cru pelo WebSocket, com um byte de marcação na
+                // frente. Sai antes de acumular e fatiar — nada disso é usado aqui.
+                var packet = new byte[pcm.Length + 1];
+                packet[0] = 1; // 1 = áudio
+                Buffer.BlockCopy(pcm, 0, packet, 1, pcm.Length);
+                OnBinaryDataReady?.Invoke(packet);
+                System.Threading.Interlocked.Increment(ref _audioFramesSent);
+                return;
+            }
+
             const int frameBytes = OpusFrameSamples * AudioCapturer.Channels * 2; // estéreo 16-bit
 
             List<byte[]> framesToSend = new List<byte[]>();
@@ -235,21 +270,55 @@ namespace RadminStreamApp
             var peers = SnapshotConnectedPeers();
             if (peers.Count == 0) return;
 
+            // Usa o formato acordado no SDP quando ja houver; antes disso, tenta com o local.
+            // Se falhar, o contador de audio na tela denuncia — nao fica mais em silencio.
+            var format = _negotiatedAudioFormat ?? _opusFormat;
+
             foreach (var frame in framesToSend)
             {
                 var mono = DownmixToMono(frame);
 
                 byte[] encoded;
-                try { encoded = _audioEncoder.EncodeAudio(mono, _opusFormat); }
-                catch (Exception ex) { WriteLog("opus_encode_error.log", ex.ToString()); continue; }
+                try
+                {
+                    encoded = _audioEncoder.EncodeAudio(mono, format);
+                }
+                catch (Exception ex)
+                {
+                    ReportAudioFailure("codificar", ex);
+                    continue;
+                }
 
                 System.Threading.Interlocked.Add(ref _statsEncodedBytes, encoded.Length);
 
                 foreach (var pc in peers)
                 {
-                    try { pc.SendAudio(OpusFrameSamples, encoded); } catch { }
+                    try
+                    {
+                        pc.SendAudio(OpusFrameSamples, encoded);
+                        System.Threading.Interlocked.Increment(ref _audioFramesSent);
+                    }
+                    catch (Exception ex)
+                    {
+                        ReportAudioFailure("enviar", ex);
+                    }
                 }
             }
+        }
+
+        /// <summary>
+        /// Registra a primeira falha de audio e avisa a interface. Antes tudo aqui era
+        /// engolido por um catch vazio, entao um problema no audio nao deixava rastro nenhum.
+        /// </summary>
+        private void ReportAudioFailure(string acao, Exception ex)
+        {
+            System.Threading.Interlocked.Increment(ref _audioFailures);
+
+            if (_audioFailureReason != null) return;
+            _audioFailureReason = $"Falha ao {acao} audio: {ex.Message}";
+
+            WriteLog("audio_error.log", $"[{acao}] {ex}");
+            OnAudioCaptureError?.Invoke(_audioFailureReason);
         }
 
         private static short[] DownmixToMono(byte[] interleavedStereo)
@@ -275,33 +344,95 @@ namespace RadminStreamApp
             }
         }
 
+        /// <summary>
+        /// Cria a saida de audio no formato de quem chegou primeiro — mono 48 kHz vindo do
+        /// Opus, ou estereo 48 kHz vindo do PCM pelo WebSocket. Assim o viewer atende aos
+        /// dois modos sem precisar saber de antemao qual o host escolheu.
+        /// </summary>
+        private void EnsureAudioOutput(WaveFormat format)
+        {
+            if (_waveOut != null) return;
+
+            lock (_pcmLock)
+            {
+                if (_waveOut != null) return;
+
+                _waveProvider = new BufferedWaveProvider(format)
+                {
+                    DiscardOnBufferOverflow = true,
+                    BufferDuration = TimeSpan.FromMilliseconds(800)
+                };
+
+                _latencyTrimmer = new LatencyTrimmingProvider(_waveProvider, MaxAudioLatency, TargetAudioLatency);
+
+                _volumeProvider = new NAudio.Wave.SampleProviders.VolumeSampleProvider(_latencyTrimmer.ToSampleProvider())
+                {
+                    Volume = _pendingVolume
+                };
+
+                _waveOut = new WaveOutEvent();
+                _waveOut.Init(_volumeProvider);
+                _waveOut.Play();
+            }
+        }
+
+        /// <summary>Audio PCM recebido pelo WebSocket (modo legado).</summary>
+        public void ProcessReceivedBinary(byte[] data)
+        {
+            if (data == null || data.Length < 2 || data[0] != 1) return;
+
+            EnsureAudioOutput(new WaveFormat(OpusSampleRate, 16, AudioCapturer.Channels));
+
+            var pcm = new byte[data.Length - 1];
+            Buffer.BlockCopy(data, 1, pcm, 0, pcm.Length);
+            _waveProvider?.AddSamples(pcm, 0, pcm.Length);
+            System.Threading.Interlocked.Increment(ref _audioFramesDecoded);
+        }
+
         /// <summary>Decodifica um pacote Opus recebido e entrega ao dispositivo de saída.</summary>
         private void OnAudioRtpReceived(RTPPacket packet)
         {
-            if (_waveProvider == null || packet?.Payload == null || packet.Payload.Length == 0) return;
+            if (packet?.Payload == null || packet.Payload.Length == 0) return;
+
+            EnsureAudioOutput(new WaveFormat(OpusSampleRate, 16, 1));
+            if (_waveProvider == null) return;
 
             try
             {
-                var pcm = _audioEncoder.DecodeAudio(packet.Payload, _opusFormat);
+                var format = _negotiatedAudioFormat ?? _opusFormat;
+                var pcm = _audioEncoder.DecodeAudio(packet.Payload, format);
                 if (pcm == null || pcm.Length == 0) return;
 
                 var bytes = new byte[pcm.Length * 2];
                 Buffer.BlockCopy(pcm, 0, bytes, 0, bytes.Length);
                 _waveProvider.AddSamples(bytes, 0, bytes.Length);
+                System.Threading.Interlocked.Increment(ref _audioFramesDecoded);
             }
             catch (Exception ex)
             {
-                WriteLog("opus_decode_error.log", ex.ToString());
+                ReportAudioFailure("decodificar", ex);
             }
         }
 
+        private float _pendingVolume = 1.0f;
+
         public void SetVolume(float volume)
         {
+            // Guardado tambem quando a saida ainda nao existe: ela e criada sob demanda, e
+            // sem isto o volume ajustado antes do primeiro audio se perdia.
+            _pendingVolume = volume;
+
             if (_volumeProvider != null)
             {
                 _volumeProvider.Volume = volume;
             }
         }
+
+        /// <summary>
+        /// Alterna entre o audio em Opus pela trilha WebRTC (padrao) e o PCM pelo WebSocket.
+        /// Deve ser definido antes de iniciar a transmissao.
+        /// </summary>
+        public void SetLegacyAudio(bool useLegacy) => _useLegacyAudio = useLegacy;
 
         /// <summary>Força o caminho GDI de captura (ver <see cref="VideoCapturer"/>).</summary>
         public void SetForceGdiCapture(bool forceGdi) => _videoCapturer?.SetForceGdiCapture(forceGdi);
@@ -408,7 +539,9 @@ namespace RadminStreamApp
             {
                 var fps = System.Threading.Interlocked.Exchange(ref _statsEncodedFrames, 0);
                 var bytes = System.Threading.Interlocked.Exchange(ref _statsEncodedBytes, 0);
+                var audio = System.Threading.Interlocked.Exchange(ref _audioFramesSent, 0);
                 OnHostStatsUpdated?.Invoke(fps, bytes * 8.0 / 1000.0);
+                OnAudioStatsUpdated?.Invoke(audio);
             }, null, 1000, 1000);
 
             return Task.CompletedTask;
@@ -418,24 +551,6 @@ namespace RadminStreamApp
         {
             InitEncoder();
             _isHost = false;
-            if (_waveOut == null)
-            {
-                // Mono 48 kHz: é o formato que sai do decodificador Opus.
-                _waveProvider = new BufferedWaveProvider(new WaveFormat(OpusSampleRate, 16, 1))
-                {
-                    DiscardOnBufferOverflow = true,
-                    BufferDuration = TimeSpan.FromMilliseconds(800)
-                };
-
-                _latencyTrimmer = new LatencyTrimmingProvider(_waveProvider, MaxAudioLatency, TargetAudioLatency);
-
-                _volumeProvider = new NAudio.Wave.SampleProviders.VolumeSampleProvider(_latencyTrimmer.ToSampleProvider());
-                _volumeProvider.Volume = 1.0f;
-
-                _waveOut = new WaveOutEvent();
-                _waveOut.Init(_volumeProvider);
-                _waveOut.Play();
-            }
 
             // Client creates a single connection (to the host)
             await CreatePeerConnection("host");
@@ -452,7 +567,9 @@ namespace RadminStreamApp
             _viewerStatsTimer = new System.Threading.Timer(_ =>
             {
                 var fps = System.Threading.Interlocked.Exchange(ref _statsDecodedFrames, 0);
+                var audio = System.Threading.Interlocked.Exchange(ref _audioFramesDecoded, 0);
                 OnViewerFpsUpdated?.Invoke(fps);
+                OnAudioStatsUpdated?.Invoke(audio);
             }, null, 1000, 1000);
 
 
@@ -474,6 +591,16 @@ namespace RadminStreamApp
             var audioTrack = new MediaStreamTrack(SDPMediaTypesEnum.audio, false,
                 new List<SDPAudioVideoMediaFormat> { new SDPAudioVideoMediaFormat(_opusFormat) });
             pc.addTrack(audioTrack);
+
+            // O formato de audio so vale depois de acordado no SDP.
+            pc.OnAudioFormatsNegotiated += (formats) =>
+            {
+                if (formats == null || formats.Count == 0) return;
+
+                var agreed = formats[0];
+                _negotiatedAudioFormat = agreed;
+                OnConnectionStateChanged?.Invoke($"Áudio: {agreed.Codec}");
+            };
 
             if (!_isHost)
             {
