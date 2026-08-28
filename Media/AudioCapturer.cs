@@ -18,6 +18,11 @@ namespace RadminStreamApp
         private ProcessAudioCapturer? _processAudioCapturer;
         private bool _useProcessCapture = false;
         private uint _targetProcessId = 0;
+
+        // Serializa abrir, fechar e reabrir a captura: a troca do programa excluído chega pela
+        // thread de UI enquanto a captura roda na sua própria thread.
+        private readonly object _captureLock = new object();
+        private bool _started;
         
         public AudioCapturer()
         {
@@ -54,14 +59,29 @@ namespace RadminStreamApp
         }
 
         /// <summary>
-        /// Configures the capturer to capture audio from a specific process.
-        /// Must be called BEFORE StartAudio().
+        /// Define o processo cujo áudio fica FORA da captura (0 = capturar todo o sistema).
+        ///
+        /// Pode ser chamado com a captura já rodando: os parâmetros só chegam ao Windows no
+        /// momento em que ela abre, então trocar o alvo exige reabri-la. Antes isto apenas
+        /// gravava os campos, e mudar a opção durante a transmissão não fazia efeito nenhum —
+        /// quem percebia no meio da live que estava sendo escutado não tinha como corrigir.
         /// </summary>
-        /// <param name="processId">The PID of the process to capture audio from.</param>
+        /// <param name="processId">PID do processo a excluir.</param>
         public void SetTargetProcess(uint processId)
         {
-            _targetProcessId = processId;
-            _useProcessCapture = processId > 0;
+            bool restart;
+            lock (_captureLock)
+            {
+                if (_targetProcessId == processId) return;
+
+                _targetProcessId = processId;
+                _useProcessCapture = processId > 0;
+                restart = _started;
+            }
+
+            // Fora da thread de quem chamou: a reabertura espera o WASAPI terminar de parar,
+            // e isso viria da thread de UI (a troca no menu de configurações).
+            if (restart) System.Threading.Tasks.Task.Run(RestartCapture);
         }
 
         /// <summary>
@@ -70,6 +90,29 @@ namespace RadminStreamApp
         public event Action<string>? OnCaptureError;
 
         public System.Threading.Tasks.Task StartAudio()
+        {
+            lock (_captureLock)
+            {
+                StartCaptureLocked();
+                _started = true;
+            }
+
+            return System.Threading.Tasks.Task.CompletedTask;
+        }
+
+        /// <summary>Fecha e reabre a captura para o alvo atual valer imediatamente.</summary>
+        private void RestartCapture()
+        {
+            lock (_captureLock)
+            {
+                if (!_started) return; // a transmissão terminou enquanto isto era agendado
+
+                StopCaptureLocked();
+                StartCaptureLocked();
+            }
+        }
+
+        private void StartCaptureLocked()
         {
             if (_useProcessCapture && _targetProcessId > 0)
             {
@@ -83,9 +126,8 @@ namespace RadminStreamApp
                     
                     // Fallback to system-wide loopback
                     _useProcessCapture = false;
-                    if (_loopbackCapture.CaptureState == NAudio.CoreAudioApi.CaptureState.Stopped)
-                        _loopbackCapture.StartRecording();
-                    return System.Threading.Tasks.Task.CompletedTask;
+                    StartLoopbackLocked();
+                    return;
                 }
 
                 // Use process-specific audio capture
@@ -106,35 +148,52 @@ namespace RadminStreamApp
                     _useProcessCapture = false;
                     _processAudioCapturer?.Dispose();
                     _processAudioCapturer = null;
-                    try
-                    {
-                        if (_loopbackCapture.CaptureState == NAudio.CoreAudioApi.CaptureState.Stopped)
-                            _loopbackCapture.StartRecording();
-                    }
-                    catch (Exception ex)
-                    {
-                        Console.WriteLine("Loopback capture already started or failed: " + ex.Message);
-                    }
+                    StartLoopbackLocked();
                 }
             }
             else
             {
                 // No specific process — use system-wide loopback
-                try
+                StartLoopbackLocked();
+            }
+        }
+
+        /// <summary>
+        /// Liga o loopback do sistema inteiro, esperando o WASAPI terminar de parar quando
+        /// vem de uma reabertura. O StopRecording é assíncrono: o estado passa por Stopping
+        /// antes de voltar a Stopped, e a checagem "== Stopped" sozinha simplesmente pulava o
+        /// start — a transmissão ficava muda sem nenhum aviso.
+        /// </summary>
+        private void StartLoopbackLocked()
+        {
+            try
+            {
+                for (int i = 0; i < 50 && _loopbackCapture.CaptureState == NAudio.CoreAudioApi.CaptureState.Stopping; i++)
                 {
-                    if (_loopbackCapture.CaptureState == NAudio.CoreAudioApi.CaptureState.Stopped)
-                        _loopbackCapture.StartRecording();
+                    System.Threading.Thread.Sleep(20);
                 }
-                catch (Exception ex)
-                {
-                    Console.WriteLine("Loopback capture already started or failed: " + ex.Message);
-                }
+
+                if (_loopbackCapture.CaptureState == NAudio.CoreAudioApi.CaptureState.Stopped)
+                    _loopbackCapture.StartRecording();
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine("Loopback capture already started or failed: " + ex.Message);
+            }
+        }
+
+        public System.Threading.Tasks.Task CloseAudio()
+        {
+            lock (_captureLock)
+            {
+                _started = false;
+                StopCaptureLocked();
             }
 
             return System.Threading.Tasks.Task.CompletedTask;
         }
 
-        public System.Threading.Tasks.Task CloseAudio()
+        private void StopCaptureLocked()
         {
             if (_processAudioCapturer != null)
             {
@@ -142,9 +201,8 @@ namespace RadminStreamApp
                 _processAudioCapturer.Dispose();
                 _processAudioCapturer = null;
             }
-            
-            _loopbackCapture?.StopRecording();
-            return System.Threading.Tasks.Task.CompletedTask;
+
+            try { _loopbackCapture?.StopRecording(); } catch { }
         }
 
         public System.Threading.Tasks.Task PauseAudio() { return System.Threading.Tasks.Task.CompletedTask; }

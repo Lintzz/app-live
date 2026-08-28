@@ -95,6 +95,14 @@ namespace RadminStreamApp
                     System.Windows.MessageBox.Show(message, "Lista de amigos",
                         MessageBoxButton.OK, MessageBoxImage.Warning));
 
+            SettingsService.OnPersistenceError += (message) =>
+                System.Windows.Application.Current.Dispatcher.InvokeAsync(() =>
+                    System.Windows.MessageBox.Show(message, "Configurações",
+                        MessageBoxButton.OK, MessageBoxImage.Warning));
+
+            _settings = SettingsService.Load();
+            _excludedAudioProcessName = _settings.ExcludedAudioProcessName;
+
             _friends = new ObservableCollection<Friend>(FriendsService.LoadFriends());
 
             _friendsView = CollectionViewSource.GetDefaultView(_friends);
@@ -1038,7 +1046,12 @@ namespace RadminStreamApp
 
         // ──────────────────── Exclusão de áudio por processo ────────────────────
 
-        private string _excludedAudioProcessName = string.Empty;
+        private Services.AppSettings _settings = new();
+
+        // Vem do settings.json e, na primeira execução, do padrão de fábrica (Discord). Começar
+        // vazio fazia toda abertura do app voltar a "capturar todo o áudio", e aí a mesa inteira
+        // se escutava sem ninguém entender por quê.
+        private string _excludedAudioProcessName = Services.AppSettings.DefaultExcludedAudioProcessName;
 
         private void LoadAudioExclusionOptions()
         {
@@ -1059,6 +1072,9 @@ namespace RadminStreamApp
 
             _excludedAudioProcessName = option.Name;
             UpdateAudioExclusionWarning();
+
+            _settings.ExcludedAudioProcessName = option.Name;
+            Services.SettingsService.Save(_settings);
 
             // Vale já na transmissão em andamento.
             _hostBroadcast?.ApplyExcludedAudioProcess(ResolveExcludedAudioPid());

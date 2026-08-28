@@ -133,3 +133,45 @@ public class LatencyTrimmingProviderTests
             $"latência escapou para {source.BufferedDuration.TotalMilliseconds}ms");
     }
 }
+
+public class AppSettingsTests
+{
+    [Fact]
+    public void FirstRunExcludesDiscord()
+    {
+        // Sem este padrão a mesa inteira se escuta: a voz dos outros sai pelos alto-falantes,
+        // o loopback recaptura e volta para eles.
+        Assert.Equal("Discord", new AppSettings().ExcludedAudioProcessName);
+    }
+
+    [Fact]
+    public void SettingsFileWithoutTheFieldStillExcludesDiscord()
+    {
+        // É o caso de quem já tem um settings.json de uma versão anterior ao campo.
+        var settings = System.Text.Json.JsonSerializer.Deserialize<AppSettings>("{}");
+
+        Assert.NotNull(settings);
+        Assert.Equal("Discord", settings!.ExcludedAudioProcessName);
+    }
+
+    [Fact]
+    public void ExplicitCaptureEverythingIsPreserved()
+    {
+        // Vazio é escolha deliberada do usuário ("Nenhum"), e não pode virar Discord de volta.
+        var settings = System.Text.Json.JsonSerializer.Deserialize<AppSettings>(
+            "{\"ExcludedAudioProcessName\":\"\"}");
+
+        Assert.NotNull(settings);
+        Assert.Equal(string.Empty, settings!.ExcludedAudioProcessName);
+    }
+
+    [Fact]
+    public void RoundTripsThroughJson()
+    {
+        var json = System.Text.Json.JsonSerializer.Serialize(
+            new AppSettings { ExcludedAudioProcessName = "Spotify" });
+        var back = System.Text.Json.JsonSerializer.Deserialize<AppSettings>(json);
+
+        Assert.Equal("Spotify", back!.ExcludedAudioProcessName);
+    }
+}
