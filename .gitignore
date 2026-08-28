@@ -3,16 +3,31 @@ bin/
 obj/
 publish_zip/
 .dotnet/
+TestResults/
+
+# Temporários do build WPF: o MSBuild cria projetos "_wpftmp" na raiz e nem sempre
+# apaga quando a compilação é interrompida.
+*_wpftmp.csproj
 
 # Arquivos locais e de cache
 *.user
 *.suo
 *.log
+*.binlog
 .vs/
+.vscode/
+.idea/
+.claude/
+
+# Lixo do Explorer do Windows
+Thumbs.db
+desktop.ini
 
 # Instalador gerado
 RadminStream_Setup.exe
 
 # Gerado pelo build a partir de <Version> no .csproj
 version.iss
-RadminStream_Setup.exe.sha256
+
+# Arquivo de verificação publicado junto do instalador
+*.sha256

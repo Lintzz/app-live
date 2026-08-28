@@ -41,7 +41,12 @@ O projeto nasceu da seguinte necessidade:
 
 Para compilar e gerar o instalador do projeto, você precisará das seguintes ferramentas:
 
-1. **.NET SDK 8.0**: Necessário para construir a aplicação (no projeto, utilizamos um binário local na pasta `.dotnet`).
+1. **.NET SDK 8.0**: Necessário para construir a aplicação. Os comandos abaixo usam um SDK
+   local em `.dotnet` (fora do versionamento). Num clone novo essa pasta não existe: instale o
+   SDK normalmente (`winget install Microsoft.DotNet.SDK.8`) e troque `.\.dotnet\dotnet.exe`
+   por `dotnet`, ou recrie a pasta com o
+   [script oficial da Microsoft](https://dot.net/v1/dotnet-install.ps1):
+   `.\dotnet-install.ps1 -Channel 8.0 -InstallDir .dotnet`
 2. **Inno Setup 6**: Necessário para gerar o arquivo `.exe` de instalação (`setup.exe`).
    - Pode ser instalado via WinGet: `winget install JRSoftware.InnoSetup`
    - Ou baixado diretamente em: [jrsoftware.org](https://jrsoftware.org/isdl.php)
