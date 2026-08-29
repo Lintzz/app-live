@@ -2,11 +2,13 @@ using System;
 using System.ComponentModel;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
+using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using RadminStreamApp.Models;
+using SIPSorcery.Net;
 
 namespace RadminStreamApp
 {
@@ -16,6 +18,19 @@ namespace RadminStreamApp
     /// </summary>
     public class ViewerSession : INotifyPropertyChanged, IDisposable
     {
+        /// <summary>
+        /// Quanto tempo sem quadro decodificado antes de admitir que algo está errado. Curto o
+        /// bastante para o usuário não achar que a imagem parada é a tela do amigo, e longo o
+        /// bastante para não piscar a cada engasgo de rede.
+        /// </summary>
+        internal static readonly TimeSpan StallThreshold = TimeSpan.FromSeconds(2);
+
+        private static readonly TimeSpan WatchdogInterval = TimeSpan.FromSeconds(1);
+
+        /// <summary>Tentativas de refazer a negociação WebRTC antes de desistir para o botão manual.</summary>
+        private const int MaxMediaRestarts = 3;
+        private static readonly TimeSpan MediaRestartDelay = TimeSpan.FromSeconds(2);
+
         public Friend Friend { get; }
         public string Ip => Friend.Ip;
         public string FriendName => Friend.DisplayName;
@@ -32,6 +47,14 @@ namespace RadminStreamApp
         private bool _streamEnded;
         private bool _disposed;
 
+        // Vigia de vídeo parado. Sem ele, uma queda de rede só aparecia quando o TCP do Windows
+        // finalmente desistia — minutos com o último quadro congelado e nada escrito na tela.
+        private System.Threading.Timer? _watchdog;
+        private long _lastFrameTicks = DateTime.UtcNow.Ticks;
+
+        private int _mediaRestarts;
+        private int _restartingMedia;
+
         /// <summary>Disparado quando o host exige senha. bool = a senha anterior foi recusada.</summary>
         public event Action<ViewerSession, bool> PasswordRequested = delegate {};
 
@@ -42,6 +65,55 @@ namespace RadminStreamApp
 
         private string _statusText = "Conectando...";
         public string StatusText { get => _statusText; private set => SetProperty(ref _statusText, value); }
+
+        private ConnectionHealth _health = ConnectionHealth.Conectando;
+        /// <summary>
+        /// Estado da conexão desta live. É a única fonte para a UI decidir o que mostrar — antes
+        /// tudo passava por <see cref="StatusText"/>, que recebia desde progresso de SDP até o
+        /// enum cru do SIPSorcery, e por isso não dava para reagir a nada.
+        /// </summary>
+        public ConnectionHealth Health
+        {
+            get => _health;
+            private set
+            {
+                if (!SetProperty(ref _health, value)) return;
+
+                RaisePropertyChanged(nameof(ShowOverlay));
+                RaisePropertyChanged(nameof(IsVideoStale));
+                RaisePropertyChanged(nameof(CanRetry));
+                RaisePropertyChanged(nameof(IsBusy));
+                RaisePropertyChanged(nameof(IsTroubled));
+            }
+        }
+
+        /// <summary>Há algo a dizer ao usuário: qualquer estado que não seja imagem fluindo.</summary>
+        public bool ShowOverlay => Health != ConnectionHealth.AoVivo;
+
+        /// <summary>
+        /// O quadro na tela é antigo. A imagem continua visível (dá contexto do que estava
+        /// acontecendo), mas apagada, para não ser confundida com a tela parada do amigo.
+        /// </summary>
+        public bool IsVideoStale => Health is ConnectionHealth.Instavel
+                                             or ConnectionHealth.Reconectando
+                                             or ConnectionHealth.Perdida;
+
+        /// <summary>Acabaram as tentativas automáticas; só resta o botão.</summary>
+        public bool CanRetry => Health == ConnectionHealth.Perdida;
+
+        /// <summary>
+        /// A conexão está em apuros, mas ainda há esperança. Destaca a célula na grade: com
+        /// várias lives abertas, é preciso enxergar de longe qual delas é a problemática.
+        /// </summary>
+        public bool IsTroubled => Health is ConnectionHealth.Instavel or ConnectionHealth.Reconectando;
+
+        /// <summary>
+        /// Ainda há algo em andamento. Separa o giro do spinner dos estados parados
+        /// (perdida, encerrada), onde animar só sugeriria um progresso que não existe.
+        /// </summary>
+        public bool IsBusy => Health is ConnectionHealth.Conectando
+                                      or ConnectionHealth.Instavel
+                                      or ConnectionHealth.Reconectando;
 
         private bool _isConnected;
         public bool IsConnected { get => _isConnected; private set => SetProperty(ref _isConnected, value); }
@@ -92,21 +164,137 @@ namespace RadminStreamApp
         }
 
         /// <summary>Ícone Segoe MDL2: alto-falante normal ou mudo.</summary>
-        public string MuteIcon => IsMuted ? "" : "";
+        public string MuteIcon => IsMuted ? "" : "";
 
         private int _audioFps;
         /// <summary>Quadros de audio decodificados por segundo. Zero com video rodando aponta
         /// o problema para o audio, e nao para a conexao.</summary>
         public int AudioFps { get => _audioFps; private set { if (SetProperty(ref _audioFps, value)) RaisePropertyChanged(nameof(StatsText)); } }
 
-        public string StatsText => $"📥 {Fps}fps | {LatencyMs}ms | 🔊 {AudioFps}/s";
+        private string _diagnostics = string.Empty;
+        /// <summary>
+        /// Detalhe técnico do caminho WebRTC. Vive na sobreposição de estatísticas, e não no
+        /// meio do vídeo: "WebRTC: failed" e "Decode Error: ..." piscavam por cima da imagem
+        /// sem dizer nada de útil a quem só quer assistir.
+        /// </summary>
+        public string Diagnostics
+        {
+            get => _diagnostics;
+            private set { if (SetProperty(ref _diagnostics, value)) RaisePropertyChanged(nameof(StatsText)); }
+        }
+
+        public string StatsText
+        {
+            get
+            {
+                var stats = $"📥 {Fps}fps | {LatencyMs}ms | 🔊 {AudioFps}/s";
+                return string.IsNullOrEmpty(Diagnostics) ? stats : $"{stats} | {Diagnostics}";
+            }
+        }
 
         public ViewerSession(Friend friend)
         {
             Friend = friend ?? throw new ArgumentNullException(nameof(friend));
         }
 
+        // ───────────────────────────── Estado da conexão ─────────────────────────────
+
+        private void SetHealth(ConnectionHealth health, string? detail = null)
+        {
+            Health = health;
+            StatusText = detail ?? DefaultStatusText(health);
+        }
+
+        private string DefaultStatusText(ConnectionHealth health) => health switch
+        {
+            ConnectionHealth.Conectando => "Conectando...",
+            ConnectionHealth.AoVivo => string.Empty,
+            ConnectionHealth.Instavel => "Sinal instável...",
+            ConnectionHealth.Reconectando => "Reconectando...",
+            ConnectionHealth.Perdida => "Conexão perdida",
+            ConnectionHealth.Encerrada => "Transmissão encerrada",
+            _ => string.Empty
+        };
+
+        /// <summary>
+        /// Decide o estado a partir de quanto tempo faz que o último quadro foi decodificado.
+        /// Só mexe entre <see cref="ConnectionHealth.AoVivo"/> e <see cref="ConnectionHealth.Instavel"/>:
+        /// os demais estados são conclusões de outra coisa (o socket caiu, o host encerrou) e
+        /// não podem ser sobrescritas por falta de imagem.
+        /// </summary>
+        internal static ConnectionHealth DecideHealth(ConnectionHealth atual, TimeSpan idadeDoUltimoFrame)
+        {
+            if (atual == ConnectionHealth.AoVivo && idadeDoUltimoFrame > StallThreshold)
+                return ConnectionHealth.Instavel;
+
+            if (atual == ConnectionHealth.Instavel && idadeDoUltimoFrame <= StallThreshold)
+                return ConnectionHealth.AoVivo;
+
+            return atual;
+        }
+
+        private void WatchdogTick(object? state)
+        {
+            if (_disposed) return;
+
+            try
+            {
+                var age = DateTime.UtcNow - new DateTime(Interlocked.Read(ref _lastFrameTicks), DateTimeKind.Utc);
+                var next = DecideHealth(Health, age);
+                if (next == Health) return;
+
+                if (next == ConnectionHealth.Instavel)
+                {
+                    // Se o que quebrou foi só a referência do decoder, um keyframe resolve em
+                    // ~300ms — bem melhor do que esperar o ciclo de 2s do host.
+                    try { _streamManager?.RequestKeyFrame(); } catch { }
+                }
+
+                SetHealth(next);
+            }
+            catch { }
+        }
+
+        // ───────────────────────────── Ciclo de vida ─────────────────────────────
+
         public async Task ConnectAsync()
+        {
+            BuildClient();
+
+            await SetupStreamManagerAsync();
+            Interlocked.Exchange(ref _lastFrameTicks, DateTime.UtcNow.Ticks);
+
+            _watchdog ??= new System.Threading.Timer(WatchdogTick, null, WatchdogInterval, WatchdogInterval);
+
+            await _client!.StartAsync(Ip, 8080);
+
+            IsConnected = true;
+            Friend.IsWatching = true;
+            if (Health == ConnectionHealth.Conectando && StatusText == "Conectando...")
+                SetHealth(ConnectionHealth.Conectando, "Conectado, aguardando vídeo...");
+        }
+
+        /// <summary>
+        /// Nova tentativa a pedido do usuário, depois de esgotadas as automáticas. Descarta o
+        /// cliente morto e recomeça do zero: o WebsocketClient já foi Dispose-ado pelo
+        /// <see cref="Disconnect"/> e não volta a se conectar.
+        /// </summary>
+        public async Task RetryAsync()
+        {
+            if (_disposed) return;
+
+            try { _client?.Stop(); } catch { }
+            _client = null;
+
+            _mediaRestarts = 0;
+            _streamEnded = false;
+            _passwordPromptOpen = false;
+            SetHealth(ConnectionHealth.Conectando);
+
+            await ConnectAsync();
+        }
+
+        private void BuildClient()
         {
             _client = new SignalingClient();
 
@@ -128,7 +316,7 @@ namespace RadminStreamApp
                     }
                     else
                     {
-                        StatusText = "Esta sala pede senha";
+                        SetHealth(ConnectionHealth.Conectando, "Esta sala pede senha");
                         PromptForPassword(previousAttemptFailed: false);
                     }
                     return;
@@ -139,20 +327,20 @@ namespace RadminStreamApp
                     // já ter com o que responder.
                     _authChallenge = authMsg.Data ?? string.Empty;
                     _password = string.Empty;
-                    StatusText = "Senha incorreta";
+                    SetHealth(ConnectionHealth.Conectando, "Senha incorreta");
                     PromptForPassword(previousAttemptFailed: true);
                     return;
                 }
                 if (authMsg != null && authMsg.Type == "AUTH_OK")
                 {
-                    _client.EnableEncryption(_password);
-                    StatusText = "Conectando...";
+                    _client!.EnableEncryption(_password);
+                    SetHealth(ConnectionHealth.Conectando);
                     SendHello();
                     return;
                 }
                 if (message == "SOURCE_CHANGED")
                 {
-                    StatusText = "Host trocou de tela...";
+                    SetHealth(ConnectionHealth.Conectando, "Host trocou de tela...");
                     return;
                 }
                 if (message == "STREAM_STOPPED")
@@ -161,13 +349,15 @@ namespace RadminStreamApp
                     _client?.SuppressReconnect();
                     try { _streamManager?.Stop(); } catch { }
                     VideoBitmap = null;
-                    StatusText = "Transmissão encerrada";
+                    SetHealth(ConnectionHealth.Encerrada);
                     return;
                 }
                 if (message == "STREAM_STARTED")
                 {
                     _streamEnded = false;
+                    _mediaRestarts = 0;
                     _client?.AllowReconnect();
+                    SetHealth(ConnectionHealth.Conectando);
                     await SetupStreamManagerAsync();
                     SendHello();
                     return;
@@ -178,7 +368,7 @@ namespace RadminStreamApp
                 {
                     if (parsed.Data == "IDLE" && !_streamEnded)
                     {
-                        StatusText = $"{FriendName} não está em live";
+                        SetHealth(ConnectionHealth.Encerrada, $"{FriendName} não está em live");
                     }
                     return;
                 }
@@ -188,7 +378,7 @@ namespace RadminStreamApp
               }
               catch (Exception ex)
               {
-                  StatusText = $"Erro na sessão de {FriendName}: {ex.Message}";
+                  Diagnostics = $"Sessão: {ex.Message}";
               }
             };
 
@@ -201,7 +391,8 @@ namespace RadminStreamApp
                     if (isReconnect)
                     {
                         _streamEnded = false;
-                        StatusText = "Reconectado!";
+                        _mediaRestarts = 0;
+                        SetHealth(ConnectionHealth.Conectando, "Reconectado, aguardando vídeo...");
                         await SetupStreamManagerAsync();
                     }
                     SendStatusCheck();
@@ -209,20 +400,30 @@ namespace RadminStreamApp
                 }
                 catch (Exception ex)
                 {
-                    StatusText = $"Falha ao (re)conectar em {FriendName}: {ex.Message}";
+                    Diagnostics = $"Reconexão: {ex.Message}";
                 }
             };
 
-            _client.OnReconnecting += (attempt) => StatusText = $"Reconectando... ({attempt}/10)";
-            _client.OnReconnectFailed += () => { StatusText = "Falha ao reconectar"; Disconnect(); };
+            // O instante da queda precisa aparecer na tela. Este evento existia e ninguém o
+            // assinava: até o watchdog ou o loop de reconexão se manifestarem, a célula ficava
+            // com o quadro congelado e nenhum texto.
+            _client.OnDisconnected += () =>
+            {
+                if (_disposed || _streamEnded) return;
+                if (Health is ConnectionHealth.Perdida or ConnectionHealth.Reconectando) return;
+                SetHealth(ConnectionHealth.Reconectando);
+            };
+
+            _client.OnReconnecting += (attempt, max) =>
+                SetHealth(ConnectionHealth.Reconectando, $"Reconectando... ({attempt}/{max})");
+
+            _client.OnReconnectFailed += () =>
+            {
+                SetHealth(ConnectionHealth.Perdida);
+                Disconnect();
+            };
+
             _client.OnLatencyUpdated += (ms) => LatencyMs = ms;
-
-            await SetupStreamManagerAsync();
-            await _client.StartAsync(Ip, 8080);
-
-            IsConnected = true;
-            Friend.IsWatching = true;
-            if (StatusText == "Conectando...") StatusText = "Conectado, aguardando vídeo...";
         }
 
         /// <summary>Abre o modal de senha, no máximo um por vez.</summary>
@@ -242,17 +443,21 @@ namespace RadminStreamApp
             SendAuth();
         }
 
-        /// <summary>Usuário cancelou o modal de senha: encerra a sessão.</summary>
+        /// <summary>Usuário cancelou o modal de senha: encerra a sessão, mas deixa o caminho de volta.</summary>
         public void CancelPassword()
         {
             _passwordPromptOpen = false;
-            StatusText = "Senha necessária";
+            SetHealth(ConnectionHealth.Perdida, "Senha necessária");
             Disconnect();
         }
 
         /// <summary>
         /// Responde ao desafio com o HMAC da senha derivada. A senha em si nunca sai daqui —
         /// antes ela ia em texto claro sobre ws:// e era legível por qualquer um na VPN.
+        ///
+        /// Vai por <c>SendPlain</c>: o AUTH é o que <em>abre</em> a sessão cifrada, então precisa
+        /// ser legível para o host. Mandando cifrado — o que acontecia em toda reconexão, porque
+        /// a chave sobrevivia à queda —, host e viewer entravam num ping-pong sem fim.
         /// </summary>
         private void SendAuth()
         {
@@ -261,7 +466,7 @@ namespace RadminStreamApp
             var key = CryptoHelper.DeriveKey(_password);
             var proof = CryptoHelper.ComputeAuthProof(key, _authChallenge);
             var authMsg = new SignalingMessage { Type = "AUTH", Data = proof };
-            _client?.SendMessage(SignalingMessage.Serialize(authMsg));
+            _client?.SendPlain(SignalingMessage.Serialize(authMsg));
         }
 
         private void SendStatusCheck()
@@ -276,6 +481,44 @@ namespace RadminStreamApp
             _client?.SendMessage(SignalingMessage.Serialize(helloMsg));
         }
 
+        /// <summary>
+        /// Refaz a negociação WebRTC sem derrubar o WebSocket. O caso que isto cobre é o UDP
+        /// morrer enquanto o TCP sobrevive: a conexão ia para <c>failed</c>, ninguém tratava, e
+        /// a célula ficava presa no último quadro até o usuário fechar e reabrir a live.
+        /// </summary>
+        private async Task RestartMediaAsync()
+        {
+            if (_disposed || _streamEnded) return;
+            if (Interlocked.Exchange(ref _restartingMedia, 1) != 0) return;
+
+            try
+            {
+                if (_mediaRestarts >= MaxMediaRestarts)
+                {
+                    SetHealth(ConnectionHealth.Perdida);
+                    return;
+                }
+
+                _mediaRestarts++;
+                SetHealth(ConnectionHealth.Instavel, $"Recuperando vídeo... ({_mediaRestarts}/{MaxMediaRestarts})");
+
+                // Renegociar em cima de uma rede que ainda está ruim só queima uma das chances.
+                await Task.Delay(MediaRestartDelay);
+                if (_disposed || _streamEnded) return;
+
+                await SetupStreamManagerAsync();
+                SendHello();
+            }
+            catch (Exception ex)
+            {
+                Diagnostics = $"Recuperação: {ex.Message}";
+            }
+            finally
+            {
+                Interlocked.Exchange(ref _restartingMedia, 0);
+            }
+        }
+
         private async Task SetupStreamManagerAsync()
         {
             if (_streamManager != null)
@@ -288,16 +531,38 @@ namespace RadminStreamApp
 
             _streamManager.OnVideoFrameDecoded += (pixelData, width, height, stride) =>
             {
+                Interlocked.Exchange(ref _lastFrameTicks, DateTime.UtcNow.Ticks);
+                _mediaRestarts = 0;
+
                 UpdateBitmap(pixelData, width, height);
-                if (!_streamEnded) StatusText = string.Empty;
+                if (!_streamEnded && Health != ConnectionHealth.AoVivo) SetHealth(ConnectionHealth.AoVivo);
             };
 
-            _streamManager.OnConnectionStateChanged += (state) =>
+            _streamManager.OnConnectionStateChanged += (state) => Diagnostics = state;
+
+            _streamManager.OnPeerStateChanged += (state) =>
             {
-                // Depois de "Transmissão encerrada" o WebRTC ainda emite closed/failed;
-                // sobrescrever aqui faria o usuário ver um erro no lugar do aviso real.
-                if (_streamEnded) return;
-                StatusText = $"WebRTC: {state}";
+                if (_disposed || _streamEnded) return;
+
+                switch (state)
+                {
+                    case RTCPeerConnectionState.connected:
+                        // O ICE reporta conexão antes de a mídia fluir: sem reiniciar o relógio,
+                        // o watchdog acusaria travamento no meio de um handshake saudável.
+                        Interlocked.Exchange(ref _lastFrameTicks, DateTime.UtcNow.Ticks);
+                        break;
+
+                    case RTCPeerConnectionState.disconnected:
+                        if (Health == ConnectionHealth.AoVivo) SetHealth(ConnectionHealth.Instavel);
+                        try { _streamManager?.RequestKeyFrame(); } catch { }
+                        break;
+
+                    case RTCPeerConnectionState.failed:
+                        // Só o failed: o closed é, quase sempre, o Stop() que nós mesmos
+                        // acabamos de chamar aqui do lado — reagir a ele viraria laço.
+                        _ = RestartMediaAsync();
+                        break;
+                }
             };
 
             _streamManager.OnLocalSdpReady += (clientId, sdpJson) => _client?.SendMessage(sdpJson);
@@ -384,6 +649,10 @@ namespace RadminStreamApp
         {
             if (_disposed) return;
             _disposed = true;
+
+            _watchdog?.Dispose();
+            _watchdog = null;
+
             Disconnect();
         }
 

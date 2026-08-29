@@ -53,6 +53,7 @@ namespace RadminStreamApp
         private volatile bool _videoArriving;
         private volatile bool _videoDecodedEver;
         private System.Threading.Timer? _keyFrameRequestTimer;
+        private TimeSpan _lastKeyFrameRequest = TimeSpan.MinValue;
 
         // ───────────────────────────── Áudio ─────────────────────────────
 
@@ -80,7 +81,20 @@ namespace RadminStreamApp
         public event Action<byte[], int, int, int>? OnLocalVideoFrameReady; // raw local pixels
 
         public event Action<string>? OnAudioCaptureError;
-        public event Action<string>? OnConnectionStateChanged; // WebRTC connection state
+
+        /// <summary>
+        /// Texto livre de diagnóstico do caminho WebRTC (progresso do SDP, erro do decoder, o
+        /// enum do SIPSorcery). Não serve para decidir nada — quem precisa reagir usa o
+        /// <see cref="OnPeerStateChanged"/>.
+        /// </summary>
+        public event Action<string>? OnConnectionStateChanged;
+
+        /// <summary>
+        /// Estado da conexão WebRTC, tipado. Existe porque o viewer precisava distinguir
+        /// "conectando" de "morreu": failed/disconnected chegavam só como texto e ninguém
+        /// tratava, então a live congelava para sempre no último quadro.
+        /// </summary>
+        public event Action<RTCPeerConnectionState>? OnPeerStateChanged;
 
         public event Action<int, double>? OnHostStatsUpdated; // fps, kbps
         public event Action<int>? OnViewerFpsUpdated; // fps
@@ -530,6 +544,30 @@ namespace RadminStreamApp
         }
 
         /// <summary>
+        /// Pede um keyframe ao host e rearma o timer que insiste no pedido.
+        ///
+        /// <c>_videoDecodedEver</c> só ia de false para true: depois do primeiro quadro
+        /// decodificado na vida da sessão, o timer acima ficava inerte para sempre. Se uma
+        /// rajada de perda destruísse a referência, o viewer não pedia nada e ficava com
+        /// macrobloco na tela até o keyframe periódico do host — até 2 segundos, toda vez.
+        /// </summary>
+        public void RequestKeyFrame()
+        {
+            if (_isHost) return;
+
+            _videoDecodedEver = false;
+
+            // Mesmo piso do lado do host: um viewer em rede ruim não pode virar uma metralhadora
+            // de pedidos, porque cada IDR atendido custa banda para todo mundo na live.
+            var now = _keyFrameClock.Elapsed;
+            if (_lastKeyFrameRequest != TimeSpan.MinValue && now - _lastKeyFrameRequest < MinForcedKeyFrameGap) return;
+            _lastKeyFrameRequest = now;
+
+            var request = new SignalingMessage { Type = "REQUEST_KEYFRAME", SenderId = "client" };
+            OnLocalSdpReady?.Invoke("host", SignalingMessage.Serialize(request));
+        }
+
+        /// <summary>
         /// Cria a conexão WebRTC do peer. Era <c>async void</c>: exceções em createOffer se
         /// perdiam no TaskScheduler e o chamador não tinha como esperar o offer sair.
         /// </summary>
@@ -592,6 +630,7 @@ namespace RadminStreamApp
             pc.onconnectionstatechange += (state) =>
             {
                 OnConnectionStateChanged?.Invoke(state.ToString());
+                OnPeerStateChanged?.Invoke(state);
                 if (state == RTCPeerConnectionState.connected && _isHost)
                 {
                     StartKeyFrameBurst();
@@ -629,6 +668,18 @@ namespace RadminStreamApp
             if (msg.Type == "REQUEST_KEYFRAME")
             {
                 if (_isHost) ServeKeyFrameRequest();
+                return;
+            }
+
+            // Um CLIENT_CONNECTED é sempre um pedido de negociação nova — o viewer acabou de
+            // entrar, ou a mídia dele morreu e ele quer recomeçar. Antes isto caía na busca
+            // abaixo, encontrava a conexão antiga e não gerava offer nenhum: o viewer que
+            // tentava se recuperar ficava esperando para sempre por um vídeo que nunca vinha.
+            if (msg.Type == "CLIENT_CONNECTED")
+            {
+                if (!_isHost) return;
+                RemoveClient(clientId);
+                await CreatePeerConnection(clientId);
                 return;
             }
 

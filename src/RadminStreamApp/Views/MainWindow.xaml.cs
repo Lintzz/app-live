@@ -163,6 +163,10 @@ namespace RadminStreamApp
                 System.Windows.Application.Current.Dispatcher.InvokeAsync(() =>
                     ShowTransientStatus($"Conexão recusada: {ip} não está na sua lista de amigos."));
             };
+            _server.OnViewerCongested += (count) =>
+            {
+                System.Windows.Application.Current.Dispatcher.InvokeAsync(() => ShowCongestion(count));
+            };
             _server.OnClientConnected += (socket) => {
                 System.Windows.Application.Current.Dispatcher.Invoke(UpdateViewerCount);
             };
@@ -410,6 +414,57 @@ namespace RadminStreamApp
             ViewerCountPanel.ToolTip = "Assistindo agora:\n• " + string.Join("\n• ", names);
         }
 
+        // ─────────────────────── Viewer com a conexão ruim (lado host) ───────────────────────
+
+        private System.Windows.Threading.DispatcherTimer? _congestionTimer;
+        private DateTime _lastCongestionUtc = DateTime.MinValue;
+        private int _congestedViewers;
+
+        /// <summary>
+        /// Troca a contagem de viewers por um aviso enquanto alguém não estiver dando conta de
+        /// receber. Sem isto, o host só via "o áudio sumiu para o fulano" e nada dizia que o
+        /// gargalo era a rede do outro lado — parecia bug do app.
+        /// </summary>
+        private void ShowCongestion(int count)
+        {
+            _congestedViewers = count;
+            _lastCongestionUtc = DateTime.UtcNow;
+
+            if (_congestionTimer == null)
+            {
+                _congestionTimer = new System.Windows.Threading.DispatcherTimer
+                {
+                    Interval = TimeSpan.FromSeconds(2)
+                };
+                _congestionTimer.Tick += (_, _) =>
+                {
+                    if (DateTime.UtcNow - _lastCongestionUtc < TimeSpan.FromSeconds(4))
+                    {
+                        RenderCongestion();
+                    }
+                    else
+                    {
+                        _congestionTimer!.Stop();
+                        UpdateViewerCount();
+                    }
+                };
+            }
+
+            if (!_congestionTimer.IsEnabled) _congestionTimer.Start();
+            RenderCongestion();
+        }
+
+        private void RenderCongestion()
+        {
+            ViewerCountText.Text = _congestedViewers == 1
+                ? "1 com conexão ruim"
+                : $"{_congestedViewers} com conexão ruim";
+
+            ViewerCountPanel.ToolTip =
+                "A rede de quem está assistindo não está dando conta. O áudio dessas pessoas está " +
+                "sendo descartado para a live não travar para as outras — não é problema da sua conexão.";
+        }
+
         private async void BtnStartStream_Click(object sender, RoutedEventArgs e)
         {
             if (!(CboWindows.SelectedItem is CaptureSource selectedSource))
@@ -576,7 +631,9 @@ namespace RadminStreamApp
             if (session == null) return;
 
             session.PasswordRequested -= Session_PasswordRequested;
-            session.Disconnect();
+            // Dispose, e não só Disconnect: a sessão carrega o timer do vigia de vídeo parado,
+            // que sem isto continuaria rodando depois de a célula sair da grade.
+            session.Dispose();
             _sessions.Remove(session);
 
             if (ActiveSession == session)
@@ -720,6 +777,25 @@ namespace RadminStreamApp
         }
 
         private void StreamTab_OnCloseRequested(ViewerSession session) => CloseSession(session);
+
+        /// <summary>
+        /// Botão "Reconectar" da célula. Existe porque, esgotadas as tentativas automáticas, a
+        /// sessão morta continuava ocupando a grade sem nenhum caminho de volta além de fechar
+        /// pelo X e reabrir a live pela lista de amigos.
+        /// </summary>
+        private async void StreamTab_OnRetryRequested(ViewerSession session)
+        {
+            if (session == null) return;
+
+            try
+            {
+                await session.RetryAsync();
+            }
+            catch (Exception ex)
+            {
+                ShowTransientStatus($"Não deu para reconectar em {session.FriendName}: {ex.Message}");
+            }
+        }
 
         private void StreamTab_OnFocusRequested(ViewerSession session)
         {

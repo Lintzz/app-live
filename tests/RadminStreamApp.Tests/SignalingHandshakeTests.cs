@@ -222,6 +222,48 @@ public class SignalingHandshakeTests : IDisposable
         Assert.True(_server.HasBroadcastTargets);
     }
 
+    [Fact]
+    public async Task EncryptedAuthIsAcceptedAfterAReconnect()
+    {
+        // Cenário real: a rede do viewer caiu, ele voltou num socket novo e ainda carrega a
+        // chave da sessão anterior, então o próprio AUTH sai criptografado. O host decidia
+        // mandar AUTH_REQUIRED antes de tentar descriptografar, não reconhecia aquele AUTH,
+        // e os dois ficavam num ping-pong AUTH_REQUIRED ↔ AUTH na velocidade do RTT — a live
+        // simplesmente nunca voltava em sala com senha.
+        using var ws = await ConnectAsync();
+
+        await SendAsync(ws, new SignalingMessage { Type = "CLIENT_CONNECTED" });
+        var challenge = await ReceiveAsync(ws);
+
+        var key = CryptoHelper.DeriveKey(Password);
+        var auth = SignalingMessage.Serialize(new SignalingMessage
+        {
+            Type = "AUTH",
+            Data = CryptoHelper.ComputeAuthProof(key, challenge.Data!)
+        });
+        var bytes = Encoding.UTF8.GetBytes(CryptoHelper.EncryptText(auth, key));
+        await ws.SendAsync(bytes, WebSocketMessageType.Text, true, CancellationToken.None);
+
+        Assert.Equal("AUTH_OK", (await ReceiveAsync(ws)).Type);
+    }
+
+    [Fact]
+    public async Task EncryptedStatusCheckIsAnsweredOnce()
+    {
+        // O STATUS_CHECK volta a passar pelo caminho normal depois da mudança de ordem: ele
+        // chega cifrado quando a sessão já está estabelecida, e continua sendo respondido.
+        using var ws = await ConnectAsync();
+
+        var key = CryptoHelper.DeriveKey(Password);
+        var check = SignalingMessage.Serialize(new SignalingMessage { Type = "STATUS_CHECK" });
+        var bytes = Encoding.UTF8.GetBytes(CryptoHelper.EncryptText(check, key));
+        await ws.SendAsync(bytes, WebSocketMessageType.Text, true, CancellationToken.None);
+
+        var response = await ReceiveAsync(ws);
+        Assert.Equal("STATUS_RESPONSE", response.Type);
+        Assert.Equal("STREAMING", response.Data);
+    }
+
     private static async Task WaitUntilAsync(Func<bool> condition, int timeoutMs = 3000)
     {
         var deadline = DateTime.UtcNow.AddMilliseconds(timeoutMs);

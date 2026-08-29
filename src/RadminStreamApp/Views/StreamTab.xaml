@@ -29,6 +29,31 @@
                 </Setter.Value>
             </Setter>
         </Style>
+
+        <Style x:Key="OverlayTextButton" TargetType="Button">
+            <Setter Property="Background" Value="#0094F2"/>
+            <Setter Property="Foreground" Value="White"/>
+            <Setter Property="BorderThickness" Value="0"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="Padding" Value="14,6"/>
+            <Setter Property="FontSize" Value="12"/>
+            <Setter Property="FontWeight" Value="SemiBold"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border x:Name="border" Background="{TemplateBinding Background}" CornerRadius="4"
+                                Padding="{TemplateBinding Padding}">
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="border" Property="Background" Value="#2AA6FF"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
     </UserControl.Resources>
 
     <Border x:Name="RootBorder" Background="#050508" CornerRadius="8" ClipToBounds="True"
@@ -39,11 +64,39 @@
                     <DataTrigger Binding="{Binding IsActive}" Value="True">
                         <Setter Property="BorderBrush" Value="#0094F2"/>
                     </DataTrigger>
+
+                    <!-- Depois do IsActive de propósito: o estado da conexão manda mais do que
+                         o destaque de foco. Uma célula em apuros tem de se distinguir na grade
+                         mesmo quando é a que está selecionada. -->
+                    <DataTrigger Binding="{Binding IsTroubled}" Value="True">
+                        <Setter Property="BorderBrush" Value="#FFB020"/>
+                    </DataTrigger>
+                    <DataTrigger Binding="{Binding CanRetry}" Value="True">
+                        <Setter Property="BorderBrush" Value="#CC2929"/>
+                    </DataTrigger>
                 </Style.Triggers>
             </Style>
         </Border.Style>
         <Grid>
-            <Image Source="{Binding VideoBitmap}" Stretch="Uniform"/>
+            <!-- O último quadro continua na tela, mas apagado: some a dúvida entre "a tela do
+                 amigo está parada" e "a conexão morreu", sem jogar fora o contexto do que ele
+                 estava mostrando. -->
+            <Image Stretch="Uniform">
+                <Image.Style>
+                    <Style TargetType="Image">
+                        <Setter Property="Source" Value="{Binding VideoBitmap}"/>
+                        <Setter Property="Opacity" Value="1"/>
+                        <Style.Triggers>
+                            <DataTrigger Binding="{Binding IsVideoStale}" Value="True">
+                                <Setter Property="Opacity" Value="0.35"/>
+                            </DataTrigger>
+                        </Style.Triggers>
+                    </Style>
+                </Image.Style>
+            </Image>
+
+            <Rectangle Fill="#55000000" IsHitTestVisible="False"
+                       Visibility="{Binding IsVideoStale, Converter={StaticResource BoolToVis}}"/>
 
             <Border Background="#88000000" CornerRadius="4" Padding="6,2" Margin="8"
                     VerticalAlignment="Top" HorizontalAlignment="Left">
@@ -71,9 +124,54 @@
                 </Button.Style>
             </Button>
 
-            <TextBlock Text="{Binding StatusText}" Foreground="#CCCCCC" FontSize="13" FontWeight="Bold"
-                       HorizontalAlignment="Center" VerticalAlignment="Center" TextWrapping="Wrap"
-                       MaxWidth="260" TextAlignment="Center"/>
+            <!-- O aviso era um texto cinza solto por cima do vídeo: sobre um quadro claro ficava
+                 ilegível. Aqui ele tem fundo próprio, e o spinner mostra que ainda há algo em
+                 andamento em vez de deixar a célula parecer travada. -->
+            <Border Background="#E6101014" CornerRadius="8" Padding="18,14" MaxWidth="280"
+                    HorizontalAlignment="Center" VerticalAlignment="Center"
+                    Visibility="{Binding ShowOverlay, Converter={StaticResource BoolToVis}}">
+                <StackPanel HorizontalAlignment="Center">
+                    <Ellipse Width="26" Height="26" Stroke="#0094F2" StrokeThickness="3"
+                             StrokeDashArray="6 18" StrokeDashCap="Round"
+                             RenderTransformOrigin="0.5,0.5" HorizontalAlignment="Center">
+                        <Ellipse.RenderTransform>
+                            <RotateTransform Angle="0"/>
+                        </Ellipse.RenderTransform>
+                        <Ellipse.Style>
+                            <Style TargetType="Ellipse">
+                                <Setter Property="Visibility" Value="Collapsed"/>
+                                <Style.Triggers>
+                                    <DataTrigger Binding="{Binding IsBusy}" Value="True">
+                                        <Setter Property="Visibility" Value="Visible"/>
+                                        <DataTrigger.EnterActions>
+                                            <BeginStoryboard x:Name="SpinnerStory">
+                                                <Storyboard>
+                                                    <DoubleAnimation
+                                                        Storyboard.TargetProperty="(UIElement.RenderTransform).(RotateTransform.Angle)"
+                                                        From="0" To="360" Duration="0:0:1.1" RepeatBehavior="Forever"/>
+                                                </Storyboard>
+                                            </BeginStoryboard>
+                                        </DataTrigger.EnterActions>
+                                        <DataTrigger.ExitActions>
+                                            <!-- Parar de verdade importa: são N células na grade,
+                                                 e animação escondida continua consumindo quadro. -->
+                                            <StopStoryboard BeginStoryboardName="SpinnerStory"/>
+                                        </DataTrigger.ExitActions>
+                                    </DataTrigger>
+                                </Style.Triggers>
+                            </Style>
+                        </Ellipse.Style>
+                    </Ellipse>
+
+                    <TextBlock Text="{Binding StatusText}" Foreground="#F0F0F0" FontSize="13" FontWeight="Bold"
+                               TextWrapping="Wrap" TextAlignment="Center" HorizontalAlignment="Center"
+                               Margin="0,10,0,0"/>
+
+                    <Button Content="Reconectar" Style="{StaticResource OverlayTextButton}"
+                            Click="BtnRetry_Click" HorizontalAlignment="Center" Margin="0,12,0,0"
+                            Visibility="{Binding CanRetry, Converter={StaticResource BoolToVis}}"/>
+                </StackPanel>
+            </Border>
 
             <Border Background="#99000000" CornerRadius="4" Padding="6,3" HorizontalAlignment="Left"
                     VerticalAlignment="Bottom" Margin="8" IsHitTestVisible="False"

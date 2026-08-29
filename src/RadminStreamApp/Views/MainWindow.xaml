@@ -356,7 +356,8 @@
                                 <DataTemplate>
                                     <local:StreamTab OnCloseRequested="StreamTab_OnCloseRequested"
                                                      OnActivated="StreamTab_OnActivated"
-                                                     OnFocusRequested="StreamTab_OnFocusRequested"/>
+                                                     OnFocusRequested="StreamTab_OnFocusRequested"
+                                                     OnRetryRequested="StreamTab_OnRetryRequested"/>
                                 </DataTemplate>
                             </ItemsControl.ItemTemplate>
                         </ItemsControl>
@@ -439,7 +440,8 @@
                                 <DataTemplate>
                                     <local:StreamTab OnCloseRequested="StreamTab_OnCloseRequested"
                                                      OnActivated="StreamTab_OnActivated"
-                                                     OnFocusRequested="StreamTab_OnFocusRequested"/>
+                                                     OnFocusRequested="StreamTab_OnFocusRequested"
+                                                     OnRetryRequested="StreamTab_OnRetryRequested"/>
                                 </DataTemplate>
                             </TabControl.ContentTemplate>
                         </TabControl>

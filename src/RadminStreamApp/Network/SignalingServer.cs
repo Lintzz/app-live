@@ -2,6 +2,8 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Linq;
+using System.Threading;
+using System.Threading.Tasks;
 using Fleck;
 
 namespace RadminStreamApp
@@ -25,6 +27,38 @@ namespace RadminStreamApp
         // Lista de amigos normalizada. Com a restrição ligada, ninguém de fora dela abre conexão.
         private readonly HashSet<string> _allowedIps = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
+        // Estado por conexão usado para conter um viewer com a rede ruim. Vive fora de
+        // _clients porque é escrito da thread de captura de áudio, ~50x/s.
+        private readonly System.Collections.Concurrent.ConcurrentDictionary<Guid, ViewerLink> _links = new();
+        private System.Threading.Timer? _heartbeatTimer;
+
+        /// <summary>
+        /// O áudio sai como PCM cru — ~176 KB/s por viewer. O Send do Fleck é um BeginWrite que
+        /// nunca bloqueia e nunca recusa: com o link do viewer congestionado, cada pacote virava
+        /// uma escrita pendente e o host crescia ~10 MB/min de buffer por viewer travado, sem
+        /// teto. Passando do primeiro limite, o áudio daquele viewer começa a ser descartado;
+        /// passando do segundo, a conexão dele é fechada e ele reconecta pelo caminho normal.
+        /// </summary>
+        private const long AudioBacklogSoftLimit = 350_000;   // ~2s de PCM
+        private const long AudioBacklogHardLimit = 1_500_000; // ~8s de PCM
+
+        /// <summary>
+        /// O viewer manda PING a cada 3s. Silêncio bem além disso significa conexão zumbi: o
+        /// keepalive TCP do Fleck (60s) nem chega a rodar enquanto há dados pendentes na fila,
+        /// então sem esta varredura o viewer morto ficava minutos em _viewers recebendo áudio.
+        /// </summary>
+        private static readonly TimeSpan ViewerSilenceTimeout = TimeSpan.FromSeconds(20);
+        private static readonly TimeSpan HeartbeatSweepInterval = TimeSpan.FromSeconds(5);
+
+        private long _lastCongestionReportTicks;
+
+        private sealed class ViewerLink
+        {
+            public long PendingBytes;
+            public long LastSeenTicks = DateTime.UtcNow.Ticks;
+            public int FailureLogged; // 0/1 — só a primeira falha de envio vai para o log
+        }
+
         public bool IsStreaming { get; set; } = false;
         public string RoomPassword { get; set; } = string.Empty;
 
@@ -42,6 +76,12 @@ namespace RadminStreamApp
 
         /// <summary>Conexão recusada por não estar na lista de amigos (IP normalizado).</summary>
         public event Action<string>? OnConnectionRejected;
+
+        /// <summary>
+        /// Quantos viewers estão com o envio atrasado agora. Sem isto, o host só via o áudio
+        /// "sumindo" para alguém e nada explicava que o problema era a rede do outro lado.
+        /// </summary>
+        public event Action<int>? OnViewerCongested;
 
         public int ConnectedClientsCount
         {
@@ -226,6 +266,7 @@ namespace RadminStreamApp
                     }
 
                     Debug.WriteLine($"[Server] Client connected: {rawIp}");
+                    GetLink(socket);
                     lock (_clientsLock)
                     {
                         _clients.Add(socket);
@@ -242,6 +283,7 @@ namespace RadminStreamApp
                         _viewers.Remove(socket.ConnectionInfo.Id);
                         _challenges.Remove(socket.ConnectionInfo.Id);
                     }
+                    _links.TryRemove(socket.ConnectionInfo.Id, out _);
                     OnClientDisconnected?.Invoke(socket);
                 };
 
@@ -249,20 +291,44 @@ namespace RadminStreamApp
                 {
                     Debug.WriteLine($"[Server] Message received from {socket.ConnectionInfo.ClientIpAddress}: {message.Substring(0, Math.Min(message.Length, 50))}...");
 
+                    MarkSeen(socket);
+
                     var msgObj = SignalingMessage.Deserialize(message);
+
+                    // A descriptografia vem ANTES de qualquer decisão. Ela ficava depois do
+                    // bloco que responde AUTH_REQUIRED, e isso travava toda reconexão em sala
+                    // com senha: o viewer mantinha a chave da sessão anterior e mandava o
+                    // próprio AUTH cifrado, que aqui não era reconhecido como AUTH — host e
+                    // viewer ficavam num ping-pong AUTH_REQUIRED ↔ AUTH na velocidade do RTT,
+                    // e a live nunca voltava.
+                    var plainMessage = message;
+                    if (msgObj == null)
+                    {
+                        var key = EncryptionKey;
+                        if (key != null)
+                        {
+                            var decrypted = CryptoHelper.TryDecryptText(message, key);
+                            if (decrypted != null)
+                            {
+                                plainMessage = decrypted;
+                                msgObj = SignalingMessage.Deserialize(decrypted);
+                            }
+                        }
+                    }
+
                     if (msgObj != null)
                     {
                         if (msgObj.Type == "STATUS_CHECK")
                         {
                             var response = new SignalingMessage { Type = "STATUS_RESPONSE", Data = IsStreaming ? "STREAMING" : "IDLE" };
-                            socket.Send(SignalingMessage.Serialize(response));
+                            SafeSend(socket, SignalingMessage.Serialize(response));
                             return;
                         }
 
                         if (msgObj.Type == "PING")
                         {
                             var pong = new SignalingMessage { Type = "PONG", Data = msgObj.Data };
-                            socket.Send(SignalingMessage.Serialize(pong));
+                            SafeSend(socket, SignalingMessage.Serialize(pong));
                             return;
                         }
 
@@ -284,29 +350,7 @@ namespace RadminStreamApp
                         }
                     }
 
-                    var plainMessage = message;
-                    var key = EncryptionKey;
-                    if (key != null)
-                    {
-                        var decrypted = CryptoHelper.TryDecryptText(message, key);
-                        if (decrypted != null) plainMessage = decrypted;
-                    }
-
-                    var effectiveMsg = ReferenceEquals(plainMessage, message)
-                        ? msgObj
-                        : SignalingMessage.Deserialize(plainMessage);
-
-                    if (effectiveMsg != null)
-                    {
-                        if (effectiveMsg.Type == "STATUS_CHECK")
-                        {
-                            var innerResponse = new SignalingMessage { Type = "STATUS_RESPONSE", Data = IsStreaming ? "STREAMING" : "IDLE" };
-                            socket.Send(SignalingMessage.Serialize(innerResponse));
-                            return;
-                        }
-
-                        if (effectiveMsg.Type == "CLIENT_CONNECTED") RegisterViewer(socket);
-                    }
+                    if (msgObj != null && msgObj.Type == "CLIENT_CONNECTED") RegisterViewer(socket);
 
                     OnMessageReceived?.Invoke(socket, plainMessage);
                 };
@@ -314,6 +358,10 @@ namespace RadminStreamApp
                 // Nao ha socket.OnBinary: nenhum viewer manda binario para o host. O audio
                 // viaja so na direcao host -> viewer, via BroadcastBinary.
             });
+
+            _heartbeatTimer = new System.Threading.Timer(
+                _ => { try { SweepSilentViewers(); } catch { } },
+                null, HeartbeatSweepInterval, HeartbeatSweepInterval);
 
             Debug.WriteLine($"[Server] Started on ws://{ipAddress}:{port}");
         }
@@ -336,7 +384,7 @@ namespace RadminStreamApp
                     _challenges[socket.ConnectionInfo.Id] = challenge;
                 }
             }
-            socket.Send(SignalingMessage.Serialize(new SignalingMessage { Type = "AUTH_REQUIRED", Data = challenge }));
+            SafeSend(socket, SignalingMessage.Serialize(new SignalingMessage { Type = "AUTH_REQUIRED", Data = challenge }));
         }
 
         /// <summary>Confere o HMAC do desafio contra o esperado, em tempo constante.</summary>
@@ -365,7 +413,7 @@ namespace RadminStreamApp
                     _authenticatedClients.Add(socket.ConnectionInfo.Id);
                     _challenges.Remove(socket.ConnectionInfo.Id);
                 }
-                socket.Send(SignalingMessage.Serialize(new SignalingMessage { Type = "AUTH_OK" }));
+                SafeSend(socket, SignalingMessage.Serialize(new SignalingMessage { Type = "AUTH_OK" }));
             }
             else
             {
@@ -373,7 +421,7 @@ namespace RadminStreamApp
                 // junto do AUTH_FAIL — senão o viewer ficaria sem desafio para tentar de novo.
                 var next = CryptoHelper.NewChallenge();
                 lock (_clientsLock) { _challenges[socket.ConnectionInfo.Id] = next; }
-                socket.Send(SignalingMessage.Serialize(new SignalingMessage { Type = "AUTH_FAIL", Data = next }));
+                SafeSend(socket, SignalingMessage.Serialize(new SignalingMessage { Type = "AUTH_FAIL", Data = next }));
             }
         }
 
@@ -399,7 +447,7 @@ namespace RadminStreamApp
             if (client != null)
             {
                 var key = EncryptionKey;
-                client.Send(key != null ? CryptoHelper.EncryptText(message, key) : message);
+                SafeSend(client, key != null ? CryptoHelper.EncryptText(message, key) : message);
             }
         }
 
@@ -408,13 +456,36 @@ namespace RadminStreamApp
             var clientsCopy = GetBroadcastTargets();
             if (clientsCopy.Count == 0) return;
 
-
             var key = EncryptionKey;
             var payload = key != null ? CryptoHelper.EncryptBytes(data, key) : data;
+
+            int congested = 0;
             foreach (var client in clientsCopy)
             {
-                client.Send(payload);
+                var link = GetLink(client);
+                var pending = Interlocked.Read(ref link.PendingBytes);
+
+                if (ShouldDropViewer(pending))
+                {
+                    // Rede do viewer não dá conta há segundos. Fechar é melhor do que continuar
+                    // enfileirando: ele volta pelo caminho normal de reconexão, e o host para de
+                    // segurar buffer por alguém que não está recebendo nada mesmo.
+                    Debug.WriteLine($"[Server] Viewer {client.ConnectionInfo.ClientIpAddress} sem vazão ({pending} bytes pendentes); fechando.");
+                    try { client.Close(); } catch { }
+                    continue;
+                }
+
+                if (ShouldDropAudio(pending))
+                {
+                    // Descarte é por viewer: quem está bem continua recebendo tudo.
+                    congested++;
+                    continue;
+                }
+
+                SafeSendBinary(client, link, payload);
             }
+
+            ReportCongestion(congested);
         }
 
         public void BroadcastMessage(string message)
@@ -426,7 +497,144 @@ namespace RadminStreamApp
             var payload = key != null ? CryptoHelper.EncryptText(message, key) : message;
             foreach (var client in clientsCopy)
             {
-                client.Send(payload);
+                // Sinalização (STREAM_STARTED/STOPPED, SOURCE_CHANGED) nunca é descartada:
+                // perder uma dessas deixa o viewer num estado que ele não tem como corrigir.
+                SafeSend(client, payload);
+            }
+        }
+
+        /// <summary>Áudio pendente demais para este viewer — descarta o pacote só para ele.</summary>
+        internal static bool ShouldDropAudio(long pendingBytes) => pendingBytes > AudioBacklogSoftLimit;
+
+        /// <summary>Backlog grande a ponto de não haver recuperação — derruba a conexão.</summary>
+        internal static bool ShouldDropViewer(long pendingBytes) => pendingBytes > AudioBacklogHardLimit;
+
+        private ViewerLink GetLink(IWebSocketConnection client)
+            => _links.GetOrAdd(client.ConnectionInfo.Id, static _ => new ViewerLink());
+
+        private void MarkSeen(IWebSocketConnection client)
+            => Interlocked.Exchange(ref GetLink(client).LastSeenTicks, DateTime.UtcNow.Ticks);
+
+        /// <summary>
+        /// Avisa a UI, no máximo uma vez por segundo. O descarte é decidido por pacote de áudio
+        /// (~50x/s): sem esta trava, cada aviso viraria um InvokeAsync na thread de UI e o
+        /// remédio custaria mais caro que a doença.
+        /// </summary>
+        private void ReportCongestion(int congested)
+        {
+            if (congested <= 0) return;
+
+            var now = DateTime.UtcNow.Ticks;
+            var last = Interlocked.Read(ref _lastCongestionReportTicks);
+            if (now - last < TimeSpan.TicksPerSecond) return;
+            if (Interlocked.CompareExchange(ref _lastCongestionReportTicks, now, last) != last) return;
+
+            OnViewerCongested?.Invoke(congested);
+        }
+
+        /// <summary>
+        /// Envio de texto que nunca deixa a exceção escapar.
+        ///
+        /// O Send do Fleck lança de forma síncrona quando o handshake ainda não terminou, e o
+        /// broadcast de áudio roda na thread de captura do WASAPI — uma única exceção dessas
+        /// encerrava a CaptureThread do NAudio e a live seguia muda até o fim, sem log nenhum.
+        /// Um throw no meio do foreach também cortava os viewers seguintes daquele pacote.
+        /// </summary>
+        private void SafeSend(IWebSocketConnection client, string payload)
+        {
+            try
+            {
+                Observe(client, client.Send(payload));
+            }
+            catch (Exception ex)
+            {
+                LogSendFailure(client, ex);
+            }
+        }
+
+        private void SafeSendBinary(IWebSocketConnection client, ViewerLink link, byte[] payload)
+        {
+            Interlocked.Add(ref link.PendingBytes, payload.Length);
+
+            try
+            {
+                var task = client.Send(payload);
+                if (task == null)
+                {
+                    Interlocked.Add(ref link.PendingBytes, -payload.Length);
+                    return;
+                }
+
+                task.ContinueWith(t =>
+                {
+                    Interlocked.Add(ref link.PendingBytes, -payload.Length);
+                    if (t.Exception != null) LogSendFailure(client, t.Exception);
+                }, TaskContinuationOptions.ExecuteSynchronously);
+            }
+            catch (Exception ex)
+            {
+                Interlocked.Add(ref link.PendingBytes, -payload.Length);
+                LogSendFailure(client, ex);
+            }
+        }
+
+        /// <summary>
+        /// Consome a Task do Fleck. Sem isto, uma falha de envio virava UnobservedTaskException
+        /// e só aparecia no log global na próxima coleta de lixo, já sem contexto nenhum.
+        /// </summary>
+        private void Observe(IWebSocketConnection client, System.Threading.Tasks.Task? task)
+        {
+            if (task == null) return;
+
+            task.ContinueWith(t =>
+            {
+                if (t.Exception != null) LogSendFailure(client, t.Exception);
+            }, TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously);
+        }
+
+        private void LogSendFailure(IWebSocketConnection client, Exception ex)
+        {
+            var link = GetLink(client);
+            if (Interlocked.Exchange(ref link.FailureLogged, 1) != 0) return;
+
+            WriteLog($"Falha ao enviar para {NormalizeIp(client.ConnectionInfo.ClientIpAddress)}: {ex.GetBaseException().Message}");
+        }
+
+        private static void WriteLog(string content)
+        {
+            try
+            {
+                var dir = System.IO.Path.Combine(
+                    Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "RadminStreamApp");
+                System.IO.Directory.CreateDirectory(dir);
+                System.IO.File.AppendAllText(System.IO.Path.Combine(dir, "error.log"),
+                    $"{DateTime.Now}: [SignalingServer] {content}\n");
+            }
+            catch { }
+        }
+
+        /// <summary>
+        /// Fecha conexões que pararam de dar sinal de vida. O viewer manda PING a cada 3s, então
+        /// silêncio prolongado só acontece quando ele já não está mais lá.
+        /// </summary>
+        private void SweepSilentViewers()
+        {
+            List<IWebSocketConnection> candidates;
+            lock (_clientsLock)
+            {
+                candidates = _clients.ToList();
+            }
+
+            var now = DateTime.UtcNow;
+            foreach (var client in candidates)
+            {
+                if (!_links.TryGetValue(client.ConnectionInfo.Id, out var link)) continue;
+
+                var silence = now - new DateTime(Interlocked.Read(ref link.LastSeenTicks), DateTimeKind.Utc);
+                if (silence <= ViewerSilenceTimeout) continue;
+
+                Debug.WriteLine($"[Server] Viewer {client.ConnectionInfo.ClientIpAddress} calado há {silence.TotalSeconds:F0}s; fechando.");
+                try { client.Close(); } catch { }
             }
         }
 
@@ -482,6 +690,9 @@ namespace RadminStreamApp
         /// </summary>
         public void Stop()
         {
+            _heartbeatTimer?.Dispose();
+            _heartbeatTimer = null;
+
             List<IWebSocketConnection> clientsCopy;
             lock (_clientsLock)
             {
@@ -491,6 +702,7 @@ namespace RadminStreamApp
                 _authenticatedClients.Clear();
                 _challenges.Clear();
             }
+            _links.Clear();
 
             foreach (var client in clientsCopy)
             {

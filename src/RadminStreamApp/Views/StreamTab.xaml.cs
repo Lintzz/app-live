@@ -11,6 +11,9 @@ namespace RadminStreamApp
         /// <summary>Duplo clique na live: alterna entre focar só nela e voltar para a grade.</summary>
         public event Action<ViewerSession> OnFocusRequested = delegate {};
 
+        /// <summary>Botão "Reconectar" do overlay, quando as tentativas automáticas acabaram.</summary>
+        public event Action<ViewerSession> OnRetryRequested = delegate {};
+
         public StreamTab()
         {
             InitializeComponent();
@@ -31,6 +34,12 @@ namespace RadminStreamApp
         {
             var session = Session;
             if (session != null) OnCloseRequested?.Invoke(session);
+        }
+
+        private void BtnRetry_Click(object sender, RoutedEventArgs e)
+        {
+            var session = Session;
+            if (session != null) OnRetryRequested?.Invoke(session);
         }
     }
 }
