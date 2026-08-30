@@ -35,14 +35,6 @@ namespace RadminStreamApp
             private set { if (_activeSession != value) { _activeSession = value; OnPropertyChanged(); } }
         }
 
-        private Visibility _tabsHeaderVisibility = Visibility.Visible;
-        /// <summary>Em teatro e tela cheia a barra de abas sai junto: fica so o video.</summary>
-        public Visibility TabsHeaderVisibility
-        {
-            get => _tabsHeaderVisibility;
-            private set { if (_tabsHeaderVisibility != value) { _tabsHeaderVisibility = value; OnPropertyChanged(); } }
-        }
-
         private bool _showStats;
         /// <summary>Liga o contador de fps/latência sobre cada live.</summary>
         public bool ShowStats
@@ -119,7 +111,6 @@ namespace RadminStreamApp
             // View própria: filtrar o foco aqui não afeta a lista de abas.
             _gridView = new CollectionViewSource { Source = _sessions }.View;
             GridSessions.ItemsSource = _gridView;
-            TabSessions.ItemsSource = _sessions;
 
             _friends.CollectionChanged += (s, ev) => { UpdateSidebarEmptyStates(); SyncAllowedIps(); };
             UpdateSidebarEmptyStates();
@@ -671,12 +662,6 @@ namespace RadminStreamApp
                 if (ActiveSession.VideoBitmap != null) _activePip?.SetBitmap(ActiveSession.VideoBitmap);
             }
 
-            // Em abas o conteudo so aparece se a aba correspondente estiver selecionada.
-            if (ActiveSession != null && !ReferenceEquals(TabSessions.SelectedItem, ActiveSession))
-            {
-                TabSessions.SelectedItem = ActiveSession;
-            }
-
             UpdatePlayerControlsState();
         }
 
@@ -684,11 +669,10 @@ namespace RadminStreamApp
         private void UpdatePlayerControlsState()
         {
             bool hasSession = ActiveSession != null;
-            bool tabsMode = ToggleGridView.IsChecked != true;
             VolumeControls.Visibility = hasSession ? Visibility.Visible : Visibility.Collapsed;
 
-            // Em abas já se vê uma live por vez; focar ali não significa nada.
-            ToggleFocus.Visibility = (hasSession && !tabsMode) ? Visibility.Visible : Visibility.Collapsed;
+            // Com uma live só, focar não muda nada na tela: o botão só aparece a partir de duas.
+            ToggleFocus.Visibility = (hasSession && _sessions.Count > 1) ? Visibility.Visible : Visibility.Collapsed;
 
             _syncingToggles = true;
             BtnMute.IsChecked = hasSession && ActiveSession!.IsMuted;
@@ -716,6 +700,10 @@ namespace RadminStreamApp
 
         private void Sessions_CollectionChanged(object? sender, NotifyCollectionChangedEventArgs e)
         {
+            // Abrir ou fechar uma live devolve a grade: com o foco preso em uma delas, a nova
+            // entraria filtrada e simplesmente nao apareceria.
+            if (_focusedSession != null) SetFocusedSession(null);
+
             UpdateViewerLayout();
             _friendsView?.Refresh();
         }
@@ -724,10 +712,17 @@ namespace RadminStreamApp
         {
             int count = _sessions.Count;
 
+            // Limpar so o campo nao basta: o filtro do CollectionView fecha sobre ele e, com
+            // ele nulo, passaria a esconder tudo -- a grade ficava vazia depois de fechar a
+            // live que estava em foco.
             if (_focusedSession != null && !_sessions.Contains(_focusedSession))
             {
                 _focusedSession = null;
-                _gridView?.Refresh();
+                if (_gridView != null)
+                {
+                    _gridView.Filter = null;
+                    _gridView.Refresh();
+                }
             }
 
             int visible = _focusedSession != null ? 1 : count;
@@ -743,6 +738,14 @@ namespace RadminStreamApp
             // Sem lives a lista fica aberta; com live ela recolhe e a aba a traz de volta,
             // empurrando o vídeo em vez de cobrir.
             SetSidebarOpen(count == 0);
+
+            // Sem nenhuma live o painel de cima e a unica coisa util na tela: a abinha some e o
+            // painel volta a aparecer. Sem isso, quem escondesse o painel e fechasse a ultima
+            // live ficava sem caminho de volta.
+            bool hasSessions = count > 0;
+            TopPanelHandle.Visibility = hasSessions ? Visibility.Visible : Visibility.Collapsed;
+            if (hasSessions) SyncFloatingHandle(TopPanelHandle);
+            else SetTopPanelOpen(true);
         }
 
         private void SidebarHandle_Click(object sender, System.Windows.Input.MouseButtonEventArgs e)
@@ -760,19 +763,45 @@ namespace RadminStreamApp
             SidebarHandle.ToolTip = open ? "Esconder amigos" : "Mostrar amigos";
         }
 
+        /// <summary>
+        /// Painel de cima (tela, transmitir, contador) aberto. Guardado à parte de
+        /// <c>TopPanel.Visibility</c> porque teatro e tela cheia escondem o painel por conta
+        /// própria: sem esta lembrança, sair do modo imersivo devolveria o painel a quem já
+        /// tinha pedido para escondê-lo.
+        /// </summary>
+        private bool _topPanelOpen = true;
+
+        private void TopPanelHandle_Click(object sender, System.Windows.Input.MouseButtonEventArgs e)
+        {
+            // Sem marcar como tratado, o clique sobe para a janela e vira DragMove.
+            e.Handled = true;
+            SetTopPanelOpen(!_topPanelOpen);
+        }
+
+        private void SetTopPanelOpen(bool open)
+        {
+            _topPanelOpen = open;
+            TopPanel.Visibility = open ? Visibility.Visible : Visibility.Collapsed;
+            TopPanelHandleArrow.Text = open ? "\uE70E" : "\uE70D";
+            TopPanelHandle.ToolTip = open ? "Esconder controles de transmissão" : "Mostrar controles de transmissão";
+        }
+
         /// <summary>Em teatro e tela cheia nada além do vídeo fica na tela.</summary>
         private void SetSidebarChromeVisible(bool visible)
         {
             SidebarHandle.Visibility = visible ? Visibility.Visible : Visibility.Collapsed;
-            TabsHeaderVisibility = visible ? Visibility.Visible : Visibility.Collapsed;
+            if (visible) SyncFloatingHandle(SidebarHandle);
             if (!visible)
             {
+                TopPanelHandle.Visibility = Visibility.Collapsed;
                 SidebarPanel.Visibility = Visibility.Collapsed;
                 SidebarColumn.Width = new GridLength(0);
             }
             else
             {
-                SetSidebarOpen(_sessions.Count == 0);
+                // Devolve sidebar, abinha do painel de cima e faixa de abas conforme o número
+                // de lives; voltar tudo direto acendia a faixa vazia com zero lives.
+                UpdateViewerLayout();
             }
         }
 
@@ -797,9 +826,14 @@ namespace RadminStreamApp
             }
         }
 
+        /// <summary>
+        /// Clique numa live: ela vira a ativa e, se houver outras na grade, entra em foco
+        /// total. O clique seguinte devolve a grade. Com uma live só não há o que alternar.
+        /// </summary>
         private void StreamTab_OnFocusRequested(ViewerSession session)
         {
             SetActiveSession(session);
+            if (_sessions.Count <= 1) return;
             SetFocusedSession(_focusedSession == session ? null : session);
         }
 
@@ -843,36 +877,6 @@ namespace RadminStreamApp
         }
 
         private void StreamTab_OnActivated(ViewerSession session) => SetActiveSession(session);
-
-        private void TabSessions_SelectionChanged(object sender, System.Windows.Controls.SelectionChangedEventArgs e)
-        {
-            if (TabSessions.SelectedItem is ViewerSession session) SetActiveSession(session);
-        }
-
-        private void TabClose_Click(object sender, RoutedEventArgs e)
-        {
-            if (sender is System.Windows.Controls.Button button && button.DataContext is ViewerSession session)
-            {
-                CloseSession(session);
-            }
-        }
-
-        private void ToggleGridView_Changed(object sender, RoutedEventArgs e)
-        {
-            bool gridMode = ToggleGridView.IsChecked == true;
-            bool tabsMode = !gridMode;
-            ToggleGridView.ToolTip = gridMode ? "Ver em abas" : "Ver em grade";
-            TabSessions.Visibility = tabsMode ? Visibility.Visible : Visibility.Collapsed;
-            GridSessions.Visibility = gridMode ? Visibility.Visible : Visibility.Collapsed;
-
-            if (tabsMode)
-            {
-                if (_focusedSession != null) SetFocusedSession(null);
-                if (ActiveSession != null) TabSessions.SelectedItem = ActiveSession;
-            }
-
-            UpdatePlayerControlsState();
-        }
 
         private void BtnManageFriends_Click(object sender, RoutedEventArgs e)
         {
@@ -1007,7 +1011,7 @@ namespace RadminStreamApp
             ResizeMode = ResizeMode.CanResize;
             WindowState = _previousWindowState;
             TitleBarGrid.Visibility = Visibility.Visible;
-            TopPanel.Visibility = Visibility.Visible;
+            SetTopPanelOpen(_topPanelOpen);
             OverlayGrid.Visibility = Visibility.Collapsed;
             ApplyImmersiveMargins(false);
             SetSidebarChromeVisible(true);
@@ -1045,7 +1049,7 @@ namespace RadminStreamApp
             _mouseIdleTimer.Stop();
             _mouseIdleTimer.Start();
 
-            if (ViewerArea.IsMouseOver || VideoControlsButtons.IsMouseOver || SidebarHandle.IsMouseOver)
+            if (ViewerArea.IsMouseOver || VideoControlsButtons.IsMouseOver || SidebarHandle.IsMouseOver || TopPanelHandle.IsMouseOver)
             {
                 ShowVideoControls();
             }
@@ -1055,8 +1059,8 @@ namespace RadminStreamApp
         {
             _mouseIdleTimer.Stop();
 
-            // Enquanto o mouse estiver na barra ou no botão de amigos, nada some.
-            if (VideoControlsButtons.IsMouseOver || SidebarHandle.IsMouseOver)
+            // Enquanto o mouse estiver na barra ou num dos botões flutuantes, nada some.
+            if (VideoControlsButtons.IsMouseOver || SidebarHandle.IsMouseOver || TopPanelHandle.IsMouseOver)
             {
                 _mouseIdleTimer.Start();
                 return;
@@ -1083,12 +1087,35 @@ namespace RadminStreamApp
             VideoControlsBar.IsHitTestVisible = interactive;
             VideoControlsBar.BeginAnimation(OpacityProperty, fade);
 
-            // O botão da lista de amigos vive sobre o vídeo e aparece junto com o resto.
+            // Os botões de amigos e do painel de cima vivem sobre o vídeo e aparecem junto com o resto.
             if (SidebarHandle.Visibility == Visibility.Visible)
             {
                 SidebarHandle.IsHitTestVisible = interactive;
                 SidebarHandle.BeginAnimation(OpacityProperty, fade);
             }
+
+            if (TopPanelHandle.Visibility == Visibility.Visible)
+            {
+                TopPanelHandle.IsHitTestVisible = interactive;
+                TopPanelHandle.BeginAnimation(OpacityProperty, fade);
+            }
+        }
+
+        /// <summary>
+        /// Alinha um botão flutuante ao estado atual da barra do player.
+        ///
+        /// Os dois botões nascem com <c>Opacity="0"</c> e só acendem dentro do fade, mas o fade
+        /// desiste na primeira linha quando a barra já está no estado pedido. Quem abrisse uma
+        /// live com o mouse sobre a janela — os controles já acesos — ganhava a abinha em
+        /// <c>Visible</c> e opacidade zero: ela só aparecia depois de o mouse parar, tudo sumir
+        /// e voltar. Aqui a opacidade é copiada da barra na hora em que o botão entra na tela.
+        /// </summary>
+        private void SyncFloatingHandle(UIElement handle)
+        {
+            // Sem soltar a animação, o valor animado tem precedência e o Opacity abaixo não pega.
+            handle.BeginAnimation(OpacityProperty, null);
+            handle.Opacity = VideoControlsBar.Opacity;
+            handle.IsHitTestVisible = VideoControlsBar.IsHitTestVisible;
         }
 
         private void BtnUpdate_Click(object sender, RoutedEventArgs e)

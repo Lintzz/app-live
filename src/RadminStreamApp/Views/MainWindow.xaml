@@ -346,7 +346,7 @@
                                        Foreground="#555560" FontSize="14" FontWeight="SemiBold" Margin="0,12,0,0" HorizontalAlignment="Center"/>
                         </StackPanel>
 
-                        <ItemsControl x:Name="GridSessions" Visibility="Collapsed">
+                        <ItemsControl x:Name="GridSessions">
                             <ItemsControl.ItemsPanel>
                                 <ItemsPanelTemplate>
                                     <UniformGrid Columns="{Binding DataContext.GridColumns, RelativeSource={RelativeSource AncestorType=ItemsControl}}"/>
@@ -362,89 +362,6 @@
                             </ItemsControl.ItemTemplate>
                         </ItemsControl>
 
-                        <TabControl x:Name="TabSessions" Background="Transparent" BorderThickness="0"
-                                    Padding="0" SelectionChanged="TabSessions_SelectionChanged">
-                            <TabControl.Template>
-                                <ControlTemplate TargetType="TabControl">
-                                    <Grid>
-                                        <Grid.RowDefinitions>
-                                            <RowDefinition Height="Auto"/>
-                                            <RowDefinition Height="*"/>
-                                        </Grid.RowDefinitions>
-                                        <Border Grid.Row="0" Background="#14141A" CornerRadius="8,8,0,0" Padding="6,6,6,0"
-                                                Visibility="{Binding DataContext.TabsHeaderVisibility, RelativeSource={RelativeSource AncestorType=Window}}">
-                                            <TabPanel IsItemsHost="True" Panel.ZIndex="1" Margin="0"/>
-                                        </Border>
-                                        <Border Grid.Row="1" Background="Transparent">
-                                            <ContentPresenter ContentSource="SelectedContent"/>
-                                        </Border>
-                                    </Grid>
-                                </ControlTemplate>
-                            </TabControl.Template>
-                            <TabControl.ItemContainerStyle>
-                                <Style TargetType="TabItem">
-                                    <Setter Property="Foreground" Value="#9A9AA4"/>
-                                    <Setter Property="FontSize" Value="12"/>
-                                    <Setter Property="FontWeight" Value="SemiBold"/>
-                                    <Setter Property="Cursor" Value="Hand"/>
-                                    <Setter Property="Margin" Value="0,0,4,0"/>
-                                    <Setter Property="Template">
-                                        <Setter.Value>
-                                            <ControlTemplate TargetType="TabItem">
-                                                <Border x:Name="tabBorder" Background="#1E1E24" CornerRadius="6,6,0,0"
-                                                        Padding="12,7" Margin="0">
-                                                    <ContentPresenter ContentSource="Header" VerticalAlignment="Center"/>
-                                                </Border>
-                                                <ControlTemplate.Triggers>
-                                                    <Trigger Property="IsMouseOver" Value="True">
-                                                        <Setter TargetName="tabBorder" Property="Background" Value="#26262E"/>
-                                                        <Setter Property="Foreground" Value="#D8D8DE"/>
-                                                    </Trigger>
-                                                    <Trigger Property="IsSelected" Value="True">
-                                                        <Setter TargetName="tabBorder" Property="Background" Value="#050508"/>
-                                                        <Setter Property="Foreground" Value="White"/>
-                                                    </Trigger>
-                                                </ControlTemplate.Triggers>
-                                            </ControlTemplate>
-                                        </Setter.Value>
-                                    </Setter>
-                                </Style>
-                            </TabControl.ItemContainerStyle>
-                            <TabControl.ItemTemplate>
-                                <DataTemplate>
-                                    <StackPanel Orientation="Horizontal">
-                                        <Ellipse Width="8" Height="8" Fill="#00D26A" VerticalAlignment="Center" Margin="0,0,7,0"/>
-                                        <TextBlock Text="{Binding FriendName}" VerticalAlignment="Center"/>
-                                        <Button Content="&#xE711;" FontFamily="Segoe MDL2 Assets" FontSize="9"
-                                                Width="18" Height="18" Margin="8,0,0,0" VerticalAlignment="Center"
-                                                Background="Transparent" Foreground="#8A8A94" BorderThickness="0"
-                                                Cursor="Hand" Click="TabClose_Click" ToolTip="Sair desta live">
-                                            <Button.Template>
-                                                <ControlTemplate TargetType="Button">
-                                                    <Border x:Name="closeBg" Background="{TemplateBinding Background}" CornerRadius="3">
-                                                        <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
-                                                    </Border>
-                                                    <ControlTemplate.Triggers>
-                                                        <Trigger Property="IsMouseOver" Value="True">
-                                                            <Setter TargetName="closeBg" Property="Background" Value="#CC2929"/>
-                                                            <Setter Property="Foreground" Value="White"/>
-                                                        </Trigger>
-                                                    </ControlTemplate.Triggers>
-                                                </ControlTemplate>
-                                            </Button.Template>
-                                        </Button>
-                                    </StackPanel>
-                                </DataTemplate>
-                            </TabControl.ItemTemplate>
-                            <TabControl.ContentTemplate>
-                                <DataTemplate>
-                                    <local:StreamTab OnCloseRequested="StreamTab_OnCloseRequested"
-                                                     OnActivated="StreamTab_OnActivated"
-                                                     OnFocusRequested="StreamTab_OnFocusRequested"
-                                                     OnRetryRequested="StreamTab_OnRetryRequested"/>
-                                </DataTemplate>
-                            </TabControl.ContentTemplate>
-                        </TabControl>
                     </Grid>
                 </Border>
 
@@ -465,6 +382,25 @@
                     </Border.Style>
                     <TextBlock x:Name="SidebarHandleArrow" Text="&#xE76C;" FontFamily="Segoe MDL2 Assets" FontSize="11"
                                Foreground="#D8D8DE" HorizontalAlignment="Center"/>
+                </Border>
+
+                <!-- Botão do painel de transmitir: mesmo gesto do botão de amigos, só que na borda de cima -->
+                <Border x:Name="TopPanelHandle" HorizontalAlignment="Center" VerticalAlignment="Top"
+                        Panel.ZIndex="21" Opacity="0" IsHitTestVisible="False" Visibility="Collapsed"
+                        Background="#D91E1E24" BorderBrush="#4D4D57" BorderThickness="1,0,1,1"
+                        CornerRadius="0,0,6,6" Padding="16,4" Cursor="Hand" ToolTip="Esconder controles de transmissão"
+                        MouseLeftButtonDown="TopPanelHandle_Click">
+                    <Border.Style>
+                        <Style TargetType="Border">
+                            <Style.Triggers>
+                                <Trigger Property="IsMouseOver" Value="True">
+                                    <Setter Property="Background" Value="#F22D2D35"/>
+                                </Trigger>
+                            </Style.Triggers>
+                        </Style>
+                    </Border.Style>
+                    <TextBlock x:Name="TopPanelHandleArrow" Text="&#xE70E;" FontFamily="Segoe MDL2 Assets" FontSize="11"
+                               Foreground="#D8D8DE" VerticalAlignment="Center"/>
                 </Border>
 
                         <!-- Controles do player: somem sozinhos e voltam quando o mouse passa -->
@@ -497,9 +433,6 @@
                                 <ToggleButton x:Name="ToggleFocus" Style="{StaticResource VideoBarToggle}"
                                               Content="&#xE8A7;" Checked="ToggleFocus_Changed" Unchecked="ToggleFocus_Changed"
                                               ToolTip="Focar só nesta live (as outras seguem conectadas)"/>
-                                <ToggleButton x:Name="ToggleGridView" Style="{StaticResource VideoBarToggle}"
-                                              Content="&#xE80A;" Checked="ToggleGridView_Changed" Unchecked="ToggleGridView_Changed"
-                                              ToolTip="Ver em grade"/>
                                 <ToggleButton x:Name="BtnPip" Style="{StaticResource VideoBarToggle}"
                                               Content="&#xEE49;" Checked="BtnPip_Changed" Unchecked="BtnPip_Changed"
                                               ToolTip="Picture-in-Picture"/>

@@ -164,7 +164,9 @@ namespace RadminStreamApp
         }
 
         /// <summary>Ícone Segoe MDL2: alto-falante normal ou mudo.</summary>
-        public string MuteIcon => IsMuted ? "" : "";
+        /// <remarks>Escapado como \uXXXX de proposito: os glifos literais da area privada
+        /// da fonte ja foram apagados uma vez numa edicao do arquivo e o botao ficou vazio.</remarks>
+        public string MuteIcon => IsMuted ? "\uE74F" : "\uE767";
 
         private int _audioFps;
         /// <summary>Quadros de audio decodificados por segundo. Zero com video rodando aponta
