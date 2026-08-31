@@ -1,6 +1,6 @@
 ---
 name: testar
-description: Compila em Release e abre o RadminStreamApp para o usuário testar na tela, com captura da janela para conferir o resultado. Use quando pedirem para rodar, abrir ou testar o app.
+description: Compila em Release e abre o StreamLiveApp para o usuário testar na tela, com captura da janela para conferir o resultado. Use quando pedirem para rodar, abrir ou testar o app.
 ---
 
 # Testar Skill
@@ -13,13 +13,13 @@ captura de tela. Não é a suíte de testes — para isso use `dotnet test`.
 ### 1. Compilar em Release
 
 ```powershell
-& ".\.dotnet\dotnet.exe" build RadminStreamLive.sln -c Release -v q --nologo
+& ".\.dotnet\dotnet.exe" build StreamLive.sln -c Release -v q --nologo
 ```
 
 Se falhar, **pare aqui** e mostre o erro. Não adianta abrir um binário velho.
 
 O executável sai em
-`src\RadminStreamApp\bin\Release\net8.0-windows10.0.19041.0\RadminStreamApp.exe`.
+`src\StreamLiveApp\bin\Release\net8.0-windows10.0.19041.0\StreamLiveApp.exe`.
 
 ### 2. Conferir se já tem instância aberta
 
@@ -27,7 +27,7 @@ O `SignalingServer` sobe **junto com o app**, não com a live: duas instâncias 
 porta 8080 e a segunda aparece offline para os amigos.
 
 ```powershell
-Get-Process RadminStreamApp -ErrorAction SilentlyContinue | Select-Object Id,StartTime
+Get-Process StreamLiveApp -ErrorAction SilentlyContinue | Select-Object Id,StartTime
 ```
 
 Se houver uma rodando, **pergunte antes de encerrar**. Ela pode estar transmitindo para
@@ -47,7 +47,8 @@ Add-Type @'
 using System;using System.Runtime.InteropServices;
 public class F { [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h); }
 '@
-$exe = "D:\Projetos\radmin-stream-live\src\RadminStreamApp\bin\Release\net8.0-windows10.0.19041.0\RadminStreamApp.exe"
+$exe = ".\src\StreamLiveApp\bin\Release\net8.0-windows10.0.19041.0\StreamLiveApp.exe"
+et8.0-windows10.0.19041.0StreamLiveApp.exe"
 $p = Start-Process -FilePath $exe -PassThru
 Start-Sleep -Seconds 5
 $p = Get-Process -Id $p.Id -ErrorAction SilentlyContinue
@@ -55,7 +56,7 @@ if ($p) { [F]::SetForegroundWindow($p.MainWindowHandle) | Out-Null; "RODANDO PID
 ```
 
 Os 5 segundos não são folga: o WPF ainda não tem `MainWindowHandle` no instante do
-`Start-Process`. Se o processo morreu, os logs estão em `%LOCALAPPDATA%\RadminStreamApp\`
+`Start-Process`. Se o processo morreu, os logs estão em `%LOCALAPPDATA%\StreamLiveApp\`
 (`error.log` e `audio_error.log`).
 
 ### 4. Capturar a janela e **olhar** a imagem
@@ -69,7 +70,7 @@ using System;using System.Runtime.InteropServices;
 public class R { [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h,out T r);
  public struct T{public int L,Tp,Rr,B;} }
 '@
-$h = (Get-Process RadminStreamApp).MainWindowHandle
+$h = (Get-Process StreamLiveApp).MainWindowHandle
 $r = New-Object R+T; [R]::GetWindowRect($h,[ref]$r) | Out-Null
 $w = $r.Rr-$r.L; $ht = $r.B-$r.Tp
 $b = New-Object System.Drawing.Bitmap($w,$ht); $g = [System.Drawing.Graphics]::FromImage($b)
@@ -100,7 +101,7 @@ Salve no diretório de scratchpad da sessão e leia o PNG com a ferramenta Read.
   ```
 
 - **Não rode `dotnet test` com o app aberto.** O projeto de testes referencia o app e o
-  rebuild trava no `RadminStreamApp.dll` em uso.
+  rebuild trava no `StreamLiveApp.dll` em uso.
 - **O usuário está mexendo na mesma janela.** Se um clique seu não surtir efeito, considere
   que ele minimizou, fechou ou clicou em outra coisa antes de concluir que há bug —
   `GetWindowRect` devolvendo coordenadas perto de `-32000` significa janela minimizada.

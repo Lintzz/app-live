@@ -1,0 +1,36 @@
+﻿
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.0.31903.59
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "src", "src", "{FC692100-440C-42E8-912F-E87CE0287522}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "StreamLiveApp", "src\StreamLiveApp\StreamLiveApp.csproj", "{0ECC7C2E-975C-49DF-950A-63F1023CD461}"
+EndProject
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "tests", "tests", "{FFE02B79-86DD-4A20-8BAF-8F35B511B1C1}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "StreamLiveApp.Tests", "tests\StreamLiveApp.Tests\StreamLiveApp.Tests.csproj", "{2D1BED2A-E65E-4E29-9C55-16C4F6B66E8B}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{0ECC7C2E-975C-49DF-950A-63F1023CD461}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{0ECC7C2E-975C-49DF-950A-63F1023CD461}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{0ECC7C2E-975C-49DF-950A-63F1023CD461}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{0ECC7C2E-975C-49DF-950A-63F1023CD461}.Release|Any CPU.Build.0 = Release|Any CPU
+		{2D1BED2A-E65E-4E29-9C55-16C4F6B66E8B}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{2D1BED2A-E65E-4E29-9C55-16C4F6B66E8B}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{2D1BED2A-E65E-4E29-9C55-16C4F6B66E8B}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{2D1BED2A-E65E-4E29-9C55-16C4F6B66E8B}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(NestedProjects) = preSolution
+		{0ECC7C2E-975C-49DF-950A-63F1023CD461} = {FC692100-440C-42E8-912F-E87CE0287522}
+		{2D1BED2A-E65E-4E29-9C55-16C4F6B66E8B} = {FFE02B79-86DD-4A20-8BAF-8F35B511B1C1}
+	EndGlobalSection
+EndGlobal

@@ -3,7 +3,7 @@
 #
 # Depois de clonar, é preciso ter o git-lfs instalado — sem ele o working tree recebe
 # ponteiros de texto no lugar das DLLs e o build falha ao carregar o FFmpeg.
-src/RadminStreamApp/FFmpegLibs/*.dll filter=lfs diff=lfs merge=lfs -text
+src/StreamLiveApp/FFmpegLibs/*.dll filter=lfs diff=lfs merge=lfs -text
 
 # Binários que não devem sofrer normalização de fim de linha.
 *.dll binary

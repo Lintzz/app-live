@@ -27,8 +27,8 @@ Thumbs.db
 desktop.ini
 
 # Instalador gerado e seu arquivo de verificação, na raiz (OutputDir do setup.iss)
-/RadminStream_Setup.exe
-/RadminStream_Setup.exe.sha256
+/StreamLive_Setup.exe
+/StreamLive_Setup.exe.sha256
 
 # Gerado pelo build a partir de <Version> no .csproj
 /build/version.iss

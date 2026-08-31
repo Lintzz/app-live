@@ -10,25 +10,25 @@
 
 [Setup]
 SourceDir={#RepoRoot}
-AppName=Radmin Stream Live
+AppName=Stream Live
 AppVersion={#AppVersion}
-DefaultDirName={pf}\Radmin Stream Live
-DefaultGroupName=Radmin Stream Live
-UninstallDisplayIcon={app}\RadminStreamApp.exe
+DefaultDirName={pf}\Stream Live
+DefaultGroupName=Stream Live
+UninstallDisplayIcon={app}\StreamLiveApp.exe
 Compression=lzma2
 SolidCompression=yes
 OutputDir=.
-OutputBaseFilename=RadminStream_Setup
+OutputBaseFilename=StreamLive_Setup
 ArchitecturesAllowed=x64
 ArchitecturesInstallIn64BitMode=x64
-SetupIconFile=src\RadminStreamApp\Assets\app_icon.ico
+SetupIconFile=src\StreamLiveApp\Assets\app_icon.ico
 
 [Files]
 Source: "publish_zip\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
-Name: "{group}\Radmin Stream Live"; Filename: "{app}\RadminStreamApp.exe"; WorkingDir: "{app}"
-Name: "{commondesktop}\Radmin Stream Live"; Filename: "{app}\RadminStreamApp.exe"; WorkingDir: "{app}"
+Name: "{group}\Stream Live"; Filename: "{app}\StreamLiveApp.exe"; WorkingDir: "{app}"
+Name: "{commondesktop}\Stream Live"; Filename: "{app}\StreamLiveApp.exe"; WorkingDir: "{app}"
 
 [Run]
-Filename: "{app}\RadminStreamApp.exe"; Description: "Launch Radmin Stream Live"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\StreamLiveApp.exe"; Description: "Launch Stream Live"; Flags: nowait postinstall skipifsilent

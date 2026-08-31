@@ -23,10 +23,10 @@ jobs:
           global-json-file: global.json
 
       - name: Restaurar dependências
-        run: dotnet restore RadminStreamLive.sln
+        run: dotnet restore StreamLive.sln
 
       - name: Compilar (Release)
-        run: dotnet build RadminStreamLive.sln -c Release --no-restore
+        run: dotnet build StreamLive.sln -c Release --no-restore
 
       - name: Rodar testes
-        run: dotnet test RadminStreamLive.sln -c Release --no-build --verbosity normal
+        run: dotnet test StreamLive.sln -c Release --no-build --verbosity normal

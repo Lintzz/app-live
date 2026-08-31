@@ -15,24 +15,24 @@ O SDK fica em `.dotnet/` (fora do versionamento). Num clone novo essa pasta não
 
 ```powershell
 # Compilar
-.\.dotnet\dotnet.exe build RadminStreamLive.sln -c Release
+.\.dotnet\dotnet.exe build StreamLive.sln -c Release
 
 # Rodar todos os testes
-.\.dotnet\dotnet.exe test RadminStreamLive.sln -c Release
+.\.dotnet\dotnet.exe test StreamLive.sln -c Release
 
 # Rodar uma classe / um teste
-.\.dotnet\dotnet.exe test RadminStreamLive.sln --filter "FullyQualifiedName~DuplicationRecoveryTests"
-.\.dotnet\dotnet.exe test RadminStreamLive.sln --filter "FullyQualifiedName~SignalingHandshakeTests.CorrectPasswordIsAccepted"
+.\.dotnet\dotnet.exe test StreamLive.sln --filter "FullyQualifiedName~DuplicationRecoveryTests"
+.\.dotnet\dotnet.exe test StreamLive.sln --filter "FullyQualifiedName~SignalingHandshakeTests.CorrectPasswordIsAccepted"
 
 # Publicar + gerar o instalador (skill /build-installer)
-if (Test-Path "publish_zip") { Remove-Item -Recurse -Force "publish_zip" } ; & ".\.dotnet\dotnet.exe" publish src\RadminStreamApp\RadminStreamApp.csproj -c Release -r win-x64 --self-contained true -o "publish_zip" ; & "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe" build\setup.iss
+if (Test-Path "publish_zip") { Remove-Item -Recurse -Force "publish_zip" } ; & ".\.dotnet\dotnet.exe" publish src\StreamLiveApp\StreamLiveApp.csproj -c Release -r win-x64 --self-contained true -o "publish_zip" ; & "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe" build\setup.iss
 ```
 
-**Git LFS é obrigatório.** As DLLs do FFmpeg em `src/RadminStreamApp/FFmpegLibs/` (~145 MB)
+**Git LFS é obrigatório.** As DLLs do FFmpeg em `src/StreamLiveApp/FFmpegLibs/` (~145 MB)
 vivem no LFS. Sem `git lfs`, o working tree recebe ponteiros de texto e o build falha ao
 carregar o FFmpeg (`git lfs pull` conserta um clone já feito).
 
-**Versão em um lugar só:** `<Version>` no `RadminStreamApp.csproj`. Dali saem o
+**Versão em um lugar só:** `<Version>` no `StreamLiveApp.csproj`. Dali saem o
 `AssemblyVersion`, o `AppInfo.Version` mostrado na UI e o `build/version.iss` (gerado pelo
 target `GenerateInnoSetupVersion`, consumido pelo `setup.iss`). Nunca edite `version.iss` nem
 repita a versão no XAML. O fluxo completo de release está na skill `/publish-release` — inclui
@@ -107,8 +107,12 @@ parâmetros só chegam ao Windows na abertura.
 
 ### Persistência e estado
 
-`friends.json` e `settings.json` em `%LOCALAPPDATA%\RadminStreamApp\` (mesma pasta de
-`error.log` e `audio_error.log`). `SettingsService.Save` grava em `.tmp` e move por cima.
+`friends.json` e `settings.json` em `%LOCALAPPDATA%\StreamLiveApp\` (mesma pasta de
+`error.log` e `audio_error.log`). O caminho sai **só** do `AppPaths` — ele cria a pasta e, na
+primeira execução depois do rename do app, move a pasta da versão anterior por cima da nova
+(sem isso o usuário abriria o app com a lista de amigos vazia). Montar o caminho à mão em
+outro lugar reintroduz o bug: quem criasse a pasta nova primeiro cancelaria a migração.
+`SettingsService.Save` grava em `.tmp` e move por cima.
 `UpdateManager` consulta a release mais recente do GitHub (`AppInfo.RepositoryOwner/Name`) e
 **exige** o `.sha256` publicado ao lado do instalador.
 
@@ -120,8 +124,8 @@ parâmetros só chegam ao Windows na abertura.
 - `Nullable` e `ImplicitUsings` ligados nos dois projetos.
 - Lógica testável é exposta como `internal static` puro (`DecideDuplicationAction`,
   `ShouldReemit`, `CopyRect`, `NormalizeIp`) e alcançada pelo `InternalsVisibleTo` para
-  `RadminStreamApp.Tests`. Prefira esse formato a testar através da UI ou da captura real.
-- Testes são xUnit em `tests/RadminStreamApp.Tests/`; o `SignalingHandshakeTests` sobe um
+  `StreamLiveApp.Tests`. Prefira esse formato a testar através da UI ou da captura real.
+- Testes são xUnit em `tests/StreamLiveApp.Tests/`; o `SignalingHandshakeTests` sobe um
   `SignalingServer` real em porta livre. O `NoWarn NU1903` (advisories do SIPSorcery 8.0.23) é
   proposital — só sai ao migrar para .NET 10.
 - A seção "Estrutura do Projeto" do README ainda afirma que não há suíte de testes; está

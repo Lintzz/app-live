@@ -1,10 +1,10 @@
-# 🎥 Radmin Stream
+# 🎥 Stream Live
 
 ![Status](https://img.shields.io/badge/Status-Em%20Desenvolvimento-yellow)
 ![Plataforma](https://img.shields.io/badge/Plataforma-Windows-blue)
 ![Framework](https://img.shields.io/badge/.NET-8.0-purple)
 
-**Radmin Stream** é um aplicativo desktop desenvolvido em C# com WPF (.NET 8.0) focado na captura e transmissão de áudio e vídeo em tempo real. Ele foi projetado para facilitar sessões de streaming privadas com **amigos** via [Radmin VPN](https://www.radmin-vpn.com/), oferecendo opções avançadas de captura de tela e áudio (global ou por processo) usando WebSockets e WebRTC.
+**Stream Live** é um aplicativo desktop desenvolvido em C# com WPF (.NET 8.0) focado na captura e transmissão de áudio e vídeo em tempo real. Ele foi projetado para facilitar sessões de streaming privadas com **amigos** via [Radmin VPN](https://www.radmin-vpn.com/), oferecendo opções avançadas de captura de tela e áudio (global ou por processo) usando WebSockets e WebRTC.
 
 > ⚠️ **Aviso de Segurança Importante!**
 > Este aplicativo foi feito **exclusivamente para ser usado entre amigos de confiança**.
@@ -61,12 +61,12 @@ O processo de compilação foi automatizado para rodar em uma única linha de co
 Abra o terminal **PowerShell** na pasta raiz do projeto e execute:
 
 ```powershell
-if (Test-Path "publish_zip") { Remove-Item -Recurse -Force "publish_zip" } ; & ".\.dotnet\dotnet.exe" publish src\RadminStreamApp\RadminStreamApp.csproj -c Release -r win-x64 --self-contained true -o "publish_zip" ; & "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe" build\setup.iss
+if (Test-Path "publish_zip") { Remove-Item -Recurse -Force "publish_zip" } ; & ".\.dotnet\dotnet.exe" publish src\StreamLiveApp\StreamLiveApp.csproj -c Release -r win-x64 --self-contained true -o "publish_zip" ; & "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe" build\setup.iss
 ```
 
 > 💡 **Dica:** Caso o `ISCC.exe` não seja encontrado no diretório local durante a compilação, verifique se o Inno Setup foi instalado globalmente em `C:\Program Files (x86)\Inno Setup 6\ISCC.exe` e ajuste o caminho no comando acima.
 
-O instalador final será gerado na raiz do projeto com o nome **`RadminStream_Setup.exe`**.
+O instalador final será gerado na raiz do projeto com o nome **`StreamLive_Setup.exe`**.
 
 ---
 
@@ -74,14 +74,14 @@ O instalador final será gerado na raiz do projeto com o nome **`RadminStream_Se
 
 ```
 .
-├── RadminStreamLive.sln          # Solução (um projeto hoje; ponto de entrada do build)
+├── StreamLive.sln                # Solução (um projeto hoje; ponto de entrada do build)
 ├── global.json                   # Fixa o SDK na linha 8.0
 ├── build/
 │   ├── setup.iss                 # Script do Inno Setup; caminhos relativos a esta pasta
 │   └── version.iss               # Gerado pelo build a partir de <Version> — não editar
 ├── src/
-│   └── RadminStreamApp/
-│       ├── RadminStreamApp.csproj
+│   └── StreamLiveApp/
+│       ├── StreamLiveApp.csproj
 │       ├── App.xaml(.cs)         # Entrada do WPF e captura global de exceções
 │       ├── Assets/               # app_icon.ico
 │       ├── Core/                 # StreamManager, HostBroadcast, ViewerSession, cripto, updates
@@ -96,7 +96,7 @@ O instalador final será gerado na raiz do projeto com o nome **`RadminStream_Se
 └── publish_zip/                  # Saída do publish, consumida pelo instalador (gerada)
 ```
 
-O instalador final sai na raiz como **`RadminStream_Setup.exe`**.
+O instalador final sai na raiz como **`StreamLive_Setup.exe`**.
 
 > ⚠️ **Não há suíte de testes no momento.** A anterior (xUnit, cobrindo cripto, serviços e o
 > handshake de sala) foi removida na reorganização e será recriada sob `tests/`.
@@ -143,7 +143,7 @@ reserva automática para máquinas onde a duplicação não está disponível (R
 
 ## 📦 Peso do repositório
 
-As DLLs do FFmpeg em `src/RadminStreamApp/FFmpegLibs/` somam ~145 MB e **já vivem no Git LFS**,
+As DLLs do FFmpeg em `src/StreamLiveApp/FFmpegLibs/` somam ~145 MB e **já vivem no Git LFS**,
 histórico incluído — o pack do repositório tem menos de 200 KB.
 
 Por isso, **é preciso ter o `git-lfs` instalado antes de clonar**. Sem ele o working tree recebe

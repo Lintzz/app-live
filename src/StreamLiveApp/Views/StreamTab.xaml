@@ -1,0 +1,183 @@
+<UserControl x:Class="StreamLiveApp.StreamTab"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             MinHeight="120" MinWidth="160"
+             MouseLeftButtonDown="Root_MouseLeftButtonDown">
+    <UserControl.Resources>
+        <BooleanToVisibilityConverter x:Key="BoolToVis"/>
+        <Style x:Key="TabIconButton" TargetType="Button">
+            <Setter Property="Background" Value="#99000000"/>
+            <Setter Property="Foreground" Value="White"/>
+            <Setter Property="BorderThickness" Value="0"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="Width" Value="26"/>
+            <Setter Property="Height" Value="26"/>
+            <Setter Property="FontFamily" Value="Segoe MDL2 Assets"/>
+            <Setter Property="FontSize" Value="12"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border x:Name="border" Background="{TemplateBinding Background}" CornerRadius="4">
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="border" Property="Background" Value="#CC3D3D45"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <Style x:Key="OverlayTextButton" TargetType="Button">
+            <Setter Property="Background" Value="#0094F2"/>
+            <Setter Property="Foreground" Value="White"/>
+            <Setter Property="BorderThickness" Value="0"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="Padding" Value="14,6"/>
+            <Setter Property="FontSize" Value="12"/>
+            <Setter Property="FontWeight" Value="SemiBold"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border x:Name="border" Background="{TemplateBinding Background}" CornerRadius="4"
+                                Padding="{TemplateBinding Padding}">
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="border" Property="Background" Value="#2AA6FF"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+    </UserControl.Resources>
+
+    <Border x:Name="RootBorder" Background="#050508" CornerRadius="8" ClipToBounds="True"
+            BorderBrush="#2D2D35" BorderThickness="1" Margin="4">
+        <Border.Style>
+            <Style TargetType="Border">
+                <Style.Triggers>
+                    <DataTrigger Binding="{Binding IsActive}" Value="True">
+                        <Setter Property="BorderBrush" Value="#0094F2"/>
+                    </DataTrigger>
+
+                    <!-- Depois do IsActive de propósito: o estado da conexão manda mais do que
+                         o destaque de foco. Uma célula em apuros tem de se distinguir na grade
+                         mesmo quando é a que está selecionada. -->
+                    <DataTrigger Binding="{Binding IsTroubled}" Value="True">
+                        <Setter Property="BorderBrush" Value="#FFB020"/>
+                    </DataTrigger>
+                    <DataTrigger Binding="{Binding CanRetry}" Value="True">
+                        <Setter Property="BorderBrush" Value="#CC2929"/>
+                    </DataTrigger>
+                </Style.Triggers>
+            </Style>
+        </Border.Style>
+        <Grid>
+            <!-- O último quadro continua na tela, mas apagado: some a dúvida entre "a tela do
+                 amigo está parada" e "a conexão morreu", sem jogar fora o contexto do que ele
+                 estava mostrando. -->
+            <Image Stretch="Uniform">
+                <Image.Style>
+                    <Style TargetType="Image">
+                        <Setter Property="Source" Value="{Binding VideoBitmap}"/>
+                        <Setter Property="Opacity" Value="1"/>
+                        <Style.Triggers>
+                            <DataTrigger Binding="{Binding IsVideoStale}" Value="True">
+                                <Setter Property="Opacity" Value="0.35"/>
+                            </DataTrigger>
+                        </Style.Triggers>
+                    </Style>
+                </Image.Style>
+            </Image>
+
+            <Rectangle Fill="#55000000" IsHitTestVisible="False"
+                       Visibility="{Binding IsVideoStale, Converter={StaticResource BoolToVis}}"/>
+
+            <Border Background="#88000000" CornerRadius="4" Padding="6,2" Margin="8"
+                    VerticalAlignment="Top" HorizontalAlignment="Left">
+                <StackPanel Orientation="Horizontal">
+                    <TextBlock Text="{Binding FriendName}" Foreground="White" FontWeight="Bold" FontSize="12"
+                               VerticalAlignment="Center"/>
+                    <TextBlock Text="&#xE74F;" FontFamily="Segoe MDL2 Assets" FontSize="11" Foreground="#FFBB00"
+                               VerticalAlignment="Center" Margin="7,0,0,0" ToolTip="Sem som"
+                               Visibility="{Binding IsMuted, Converter={StaticResource BoolToVis}}"/>
+                </StackPanel>
+            </Border>
+
+            <!-- Só o fechar fica na célula: volume e mudo vivem na barra do player -->
+            <Button Content="&#xE711;" Background="#CC2929" Click="BtnClose_Click" ToolTip="Sair desta live"
+                    HorizontalAlignment="Right" VerticalAlignment="Top" Margin="8">
+                <Button.Style>
+                    <Style TargetType="Button" BasedOn="{StaticResource TabIconButton}">
+                        <Setter Property="Opacity" Value="0"/>
+                        <Style.Triggers>
+                            <DataTrigger Binding="{Binding IsMouseOver, RelativeSource={RelativeSource AncestorType=UserControl}}" Value="True">
+                                <Setter Property="Opacity" Value="1"/>
+                            </DataTrigger>
+                        </Style.Triggers>
+                    </Style>
+                </Button.Style>
+            </Button>
+
+            <!-- O aviso era um texto cinza solto por cima do vídeo: sobre um quadro claro ficava
+                 ilegível. Aqui ele tem fundo próprio, e o spinner mostra que ainda há algo em
+                 andamento em vez de deixar a célula parecer travada. -->
+            <Border Background="#E6101014" CornerRadius="8" Padding="18,14" MaxWidth="280"
+                    HorizontalAlignment="Center" VerticalAlignment="Center"
+                    Visibility="{Binding ShowOverlay, Converter={StaticResource BoolToVis}}">
+                <StackPanel HorizontalAlignment="Center">
+                    <Ellipse Width="26" Height="26" Stroke="#0094F2" StrokeThickness="3"
+                             StrokeDashArray="6 18" StrokeDashCap="Round"
+                             RenderTransformOrigin="0.5,0.5" HorizontalAlignment="Center">
+                        <Ellipse.RenderTransform>
+                            <RotateTransform Angle="0"/>
+                        </Ellipse.RenderTransform>
+                        <Ellipse.Style>
+                            <Style TargetType="Ellipse">
+                                <Setter Property="Visibility" Value="Collapsed"/>
+                                <Style.Triggers>
+                                    <DataTrigger Binding="{Binding IsBusy}" Value="True">
+                                        <Setter Property="Visibility" Value="Visible"/>
+                                        <DataTrigger.EnterActions>
+                                            <BeginStoryboard x:Name="SpinnerStory">
+                                                <Storyboard>
+                                                    <DoubleAnimation
+                                                        Storyboard.TargetProperty="(UIElement.RenderTransform).(RotateTransform.Angle)"
+                                                        From="0" To="360" Duration="0:0:1.1" RepeatBehavior="Forever"/>
+                                                </Storyboard>
+                                            </BeginStoryboard>
+                                        </DataTrigger.EnterActions>
+                                        <DataTrigger.ExitActions>
+                                            <!-- Parar de verdade importa: são N células na grade,
+                                                 e animação escondida continua consumindo quadro. -->
+                                            <StopStoryboard BeginStoryboardName="SpinnerStory"/>
+                                        </DataTrigger.ExitActions>
+                                    </DataTrigger>
+                                </Style.Triggers>
+                            </Style>
+                        </Ellipse.Style>
+                    </Ellipse>
+
+                    <TextBlock Text="{Binding StatusText}" Foreground="#F0F0F0" FontSize="13" FontWeight="Bold"
+                               TextWrapping="Wrap" TextAlignment="Center" HorizontalAlignment="Center"
+                               Margin="0,10,0,0"/>
+
+                    <Button Content="Reconectar" Style="{StaticResource OverlayTextButton}"
+                            Click="BtnRetry_Click" HorizontalAlignment="Center" Margin="0,12,0,0"
+                            Visibility="{Binding CanRetry, Converter={StaticResource BoolToVis}}"/>
+                </StackPanel>
+            </Border>
+
+            <Border Background="#99000000" CornerRadius="4" Padding="6,3" HorizontalAlignment="Left"
+                    VerticalAlignment="Bottom" Margin="8" IsHitTestVisible="False"
+                    Visibility="{Binding DataContext.ShowStats, RelativeSource={RelativeSource AncestorType=Window}, Converter={StaticResource BoolToVis}}">
+                <TextBlock Text="{Binding StatsText}" Foreground="White" FontSize="10" FontFamily="Consolas"/>
+            </Border>
+        </Grid>
+    </Border>
+</UserControl>
